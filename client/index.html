@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mauvais Plan</title>
+    <meta name="description" content="Un cambriolage coopératif pour deux joueurs. Qu'est-ce qui pourrait mal tourner ?" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='34' r='26' fill='%238b5cf6' stroke='%232a1f3d' stroke-width='4'/%3E%3Crect x='12' y='26' width='40' height='16' rx='8' fill='%23f2c4a0' stroke='%232a1f3d' stroke-width='3'/%3E%3Ccircle cx='24' cy='34' r='4' fill='%232a1f3d'/%3E%3Ccircle cx='40' cy='34' r='4' fill='%232a1f3d'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Accueil -->
+      <section id="screen-home" class="screen">
+        <div class="card home-card">
+          <div class="portraits" id="home-portraits"></div>
+          <h1 class="logo">Mauvais <span>Plan</span></h1>
+          <p class="tagline">Un cambriolage à deux. Qu'est-ce qui pourrait mal tourner&nbsp;?</p>
+
+          <label class="field">
+            <span>Ton pseudo</span>
+            <input id="name" type="text" maxlength="16" autocomplete="nickname" placeholder="ex. Lulu la Fouine" />
+          </label>
+
+          <button id="btn-create" class="btn primary big">Créer une partie</button>
+
+          <div class="divider"><span>ou rejoindre un complice</span></div>
+
+          <div class="join-row">
+            <input id="code" type="text" maxlength="5" autocomplete="off" spellcheck="false" placeholder="CODE" aria-label="Code de la partie" />
+            <button id="btn-join" class="btn">Rejoindre</button>
+          </div>
+          <p id="home-error" class="error" role="alert"></p>
+        </div>
+      </section>
+
+      <!-- Salon -->
+      <section id="screen-lobby" class="screen hidden">
+        <div class="card lobby-card">
+          <header class="lobby-head">
+            <h2>Salon privé</h2>
+            <div class="code-box" title="Code de la partie">
+              <small>Code</small>
+              <strong id="lobby-code">-----</strong>
+            </div>
+          </header>
+
+          <div class="invite">
+            <input id="invite-link" type="text" readonly aria-label="Lien d'invitation" />
+            <button id="btn-copy" class="btn">Copier le lien</button>
+          </div>
+          <p class="muted small">Envoie ce lien (ou le code) à ton complice : il l'ouvre dans son navigateur, choisit un pseudo et clique sur «&nbsp;Rejoindre&nbsp;».</p>
+
+          <div class="seats">
+            <div class="seat" id="seat-0"></div>
+            <div class="seat" id="seat-1"></div>
+          </div>
+
+          <p id="lobby-status" class="lobby-status"></p>
+          <button id="btn-ready" class="btn primary big">Je suis prêt !</button>
+
+          <details class="rules">
+            <summary>Le plan (enfin, en théorie)</summary>
+            <ul>
+              <li>Volez les objets de la maison et déposez-les dans la <b>zone de fuite</b>, près du camion.</li>
+              <li>Les petits objets se portent seul. Les <b>gros</b> se portent à deux&nbsp;: chacun prend une poignée avec <kbd>E</kbd>, puis vous avancez dans la même direction.</li>
+              <li>Évitez le <b>cône de vision</b> du gardien. S'il vous attrape, direction le cabanon&nbsp;: votre complice vous libère en maintenant <kbd>E</kbd> devant le cadenas.</li>
+              <li>La caméra prévient le gardien. Maintenez <kbd>E</kbd> sur le boîtier électrique dehors pour la couper.</li>
+              <li>Pour partir, soyez tous les deux au camion et appuyez sur <kbd>E</kbd>. Vous avez 5 minutes.</li>
+            </ul>
+          </details>
+
+          <button id="btn-leave" class="btn ghost small-btn">Quitter le salon</button>
+        </div>
+      </section>
+
+      <!-- Jeu -->
+      <section id="screen-game" class="screen game hidden">
+        <div id="hud">
+          <div class="hud-block timer-block">
+            <small>Temps</small>
+            <strong id="hud-timer">5:00</strong>
+          </div>
+          <div class="hud-block loot-block">
+            <small>Butin dans le camion</small>
+            <div class="loot-line">
+              <strong id="hud-loot">0 €</strong>
+              <span id="hud-slots" class="slots"></span>
+            </div>
+          </div>
+          <div class="hud-block cam-block">
+            <small>Caméra</small>
+            <strong id="hud-cam" class="chip on">Active</strong>
+          </div>
+          <div class="hud-block partner-block">
+            <span id="hud-partner-dot" class="dot"></span>
+            <div>
+              <small id="hud-partner-name">Complice</small>
+              <strong id="hud-partner-status">Libre</strong>
+            </div>
+          </div>
+          <button id="btn-mute" class="icon-btn" title="Couper le son" aria-label="Couper le son"></button>
+        </div>
+
+        <div id="game-wrap">
+          <div id="game-canvas"></div>
+
+          <div id="overlay-pause" class="overlay hidden">
+            <div class="card modal">
+              <h2>Partie en pause</h2>
+              <p id="pause-text"></p>
+              <div class="big-timer" id="pause-timer">1:00</div>
+              <p class="muted small">La partie reprendra automatiquement à son retour.</p>
+            </div>
+          </div>
+
+          <div id="overlay-end" class="overlay hidden">
+            <div class="card modal end">
+              <div id="end-badge" class="end-badge"></div>
+              <h2 id="end-title"></h2>
+              <p id="end-sub"></p>
+              <div class="stats">
+                <div><small>Butin déposé</small><strong id="end-loot"></strong></div>
+                <div><small>Objets récupérés</small><strong id="end-items"></strong></div>
+                <div><small>Évasion</small><strong id="end-escape"></strong></div>
+              </div>
+              <div id="end-stars" class="stars"></div>
+              <div class="end-actions">
+                <button id="btn-replay" class="btn primary big">Rejouer</button>
+                <button id="btn-to-lobby" class="btn">Retour au salon</button>
+              </div>
+              <p id="end-replay-status" class="muted small"></p>
+            </div>
+          </div>
+
+          <div id="toasts"></div>
+        </div>
+
+        <div id="controls-bar">
+          <span><kbd>Z</kbd><kbd>Q</kbd><kbd>S</kbd><kbd>D</kbd> / <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / flèches : se déplacer</span>
+          <span><kbd>E</kbd> : interagir (maintenir pour la caméra et le cadenas)</span>
+          <span><kbd>Espace</kbd> : lâcher</span>
+        </div>
+      </section>
+
+      <div id="conn-banner" class="conn-banner hidden" role="status"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
