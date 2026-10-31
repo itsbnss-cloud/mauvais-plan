@@ -12,6 +12,9 @@ import {
   INPUT_STALE_AFTER,
   ITEM_COUNT,
   PLAYER_RADIUS,
+  SOLO_BIG_SPEED,
+  SOLO_CAMERA_OFF_TIME,
+  SOLO_JAIL_TIME,
 } from '../shared/constants';
 import { circleHitsAny, coneSees, dist, normalize, rectHitsAny } from '../shared/geometry';
 import {
@@ -51,6 +54,8 @@ interface PlayerState {
   moving: boolean;
   carry: Carry;
   jailed: boolean;
+  /** Solo : temps restant avant l'évasion du cabanon. */
+  jailLeft: number;
   leave: boolean;
   hold: HoldAction;
   queue: InputCmd[];
@@ -92,6 +97,8 @@ export class Game {
   cameraEnabled = true;
   cameraAlarm = 0;
   freeProgress = 0;
+  /** Solo : la caméra reste coupée jusqu'à cet instant (horloge interne). */
+  cameraOffUntil = 0;
   loot = 0;
   delivered = 0;
   result: GameResult | null = null;
@@ -99,8 +106,11 @@ export class Game {
   private cameraCooldown = 0;
   private events: GameEvent[] = [];
 
-  constructor() {
-    this.players = ([0, 1] as Seat[]).map((seat) => ({
+  readonly solo: boolean;
+
+  constructor(opts: { solo?: boolean } = {}) {
+    this.solo = opts.solo === true;
+    this.players = ((this.solo ? [0] : [0, 1]) as Seat[]).map((seat) => ({
       seat,
       x: SPAWNS[seat].x,
       y: SPAWNS[seat].y,
@@ -108,6 +118,7 @@ export class Game {
       moving: false,
       carry: null,
       jailed: false,
+      jailLeft: 0,
       leave: false,
       hold: null,
       queue: [],
@@ -201,14 +212,17 @@ export class Game {
       p.y = pos.y;
       p.carry = { kind: 'big', item: it.id, handle: inter.handle };
       it.holders[inter.handle] = p.seat;
-      if (it.holders[0] !== null && it.holders[1] !== null) it.state = 'carried';
+      // En solo, un seul porteur suffit (mais il avance lentement).
+      if (this.solo || (it.holders[0] !== null && it.holders[1] !== null)) it.state = 'carried';
       it.push = 'wait';
       this.events.push({ type: 'grab', seat: p.seat, item: it.id });
+    } else if (inter.type === 'switch' && this.solo) {
+      this.cameraOffUntil = this.time + SOLO_CAMERA_OFF_TIME;
     } else if (inter.type === 'leave') {
       p.leave = true;
       this.events.push({ type: 'leave', seat: p.seat });
     }
-    // 'free' et 'switch' sont des actions maintenues, traitées à chaque tick.
+    // 'free' et 'switch' (à deux) sont des actions maintenues, traitées à chaque tick.
   }
 
   private dropAction(p: PlayerState) {
@@ -299,26 +313,27 @@ export class Game {
   private updateBigItems(dt: number) {
     for (const it of this.items) {
       if (it.def.kind !== 'big' || it.state !== 'carried') continue;
-      const [a, b] = it.holders.map((s) => this.players[s!]);
-      const da = this.fresh(a) ? { x: a.dirX, y: a.dirY } : { x: 0, y: 0 };
-      const db = this.fresh(b) ? { x: b.dirX, y: b.dirY } : { x: 0, y: 0 };
-      const la = Math.hypot(da.x, da.y);
-      const lb = Math.hypot(db.x, db.y);
-      a.moving = b.moving = false;
-      if (la < 0.1 || lb < 0.1) {
+      const carriers = it.holders.filter((s) => s !== null).map((s) => this.players[s]);
+      const dirs = carriers.map((p) => (this.fresh(p) ? { x: p.dirX, y: p.dirY } : { x: 0, y: 0 }));
+      const lens = dirs.map((d) => Math.hypot(d.x, d.y));
+      const [da, db] = dirs;
+      for (const p of carriers) p.moving = false;
+      if (lens.some((l) => l < 0.1)) {
         it.push = 'wait';
-      } else if ((da.x * db.x + da.y * db.y) / (la * lb) < 0.3) {
+      } else if (db && (da.x * db.x + da.y * db.y) / (lens[0] * lens[1]) < 0.3) {
         it.push = 'opposed';
       } else {
-        const dir = normalize(da.x + db.x, da.y + db.y);
-        const step = CARRY_BIG_SPEED * dt;
+        const dir = normalize(da.x + (db?.x ?? 0), da.y + (db?.y ?? 0));
+        const step = (this.solo ? SOLO_BIG_SPEED : CARRY_BIG_SPEED) * dt;
         const mx = this.tryMoveBig(it, dir.x * step, 0);
         const my = this.tryMoveBig(it, 0, dir.y * step);
         it.push = mx || my ? 'moving' : 'blocked';
-        a.angle = b.angle = Math.atan2(dir.y, dir.x);
-        a.moving = b.moving = it.push === 'moving';
+        for (const p of carriers) {
+          p.angle = Math.atan2(dir.y, dir.x);
+          p.moving = it.push === 'moving';
+        }
       }
-      for (const p of [a, b]) {
+      for (const p of carriers) {
         const h = (p.carry as { handle: 0 | 1 }).handle;
         const pos = handlePos(it.x, it.y, it.def, h);
         p.x = pos.x;
@@ -336,9 +351,9 @@ export class Game {
       const nx = it.x + dx * f;
       const ny = it.y + dy * f;
       if (rectHitsAny(bigItemRect(nx, ny, it.def), obstacles)) continue;
-      const h0 = handlePos(nx, ny, it.def, 0);
-      const h1 = handlePos(nx, ny, it.def, 1);
-      if (circleHitsAny(h0.x, h0.y, PLAYER_RADIUS, obstacles) || circleHitsAny(h1.x, h1.y, PLAYER_RADIUS, obstacles)) continue;
+      // Seules les poignées tenues doivent avoir la place pour leur porteur.
+      const handles = ([0, 1] as const).filter((h) => it.holders[h] !== null).map((h) => handlePos(nx, ny, it.def, h));
+      if (handles.some((h) => circleHitsAny(h.x, h.y, PLAYER_RADIUS, obstacles))) continue;
       it.x = nx;
       it.y = ny;
       return true;
@@ -361,7 +376,8 @@ export class Game {
         p.hold = 'free';
       }
     }
-    this.cameraEnabled = !switchHeld;
+    this.cameraEnabled = !switchHeld && this.time >= this.cameraOffUntil;
+    if (this.solo) return this.updateSoloJail(dt);
     if (!freeing) {
       this.freeProgress = 0;
       return;
@@ -369,15 +385,31 @@ export class Game {
     this.freeProgress += dt;
     if (this.freeProgress >= FREE_HOLD_TIME) {
       this.freeProgress = 0;
-      for (const p of this.players) {
-        if (!p.jailed) continue;
-        p.jailed = false;
-        p.x = JAIL.exits[p.seat].x;
-        p.y = JAIL.exits[p.seat].y;
-        p.angle = Math.PI / 2;
-        this.events.push({ type: 'freed', seat: p.seat });
-      }
+      for (const p of this.players) if (p.jailed) this.release(p);
     }
+  }
+
+  /** Solo : personne pour ouvrir le cadenas, on s'évade seul au bout d'un moment. */
+  private updateSoloJail(dt: number) {
+    const p = this.players[0];
+    if (!p.jailed) {
+      this.freeProgress = 0;
+      return;
+    }
+    p.jailLeft -= dt;
+    this.freeProgress = Math.min(1, 1 - p.jailLeft / SOLO_JAIL_TIME);
+    if (p.jailLeft <= 0) {
+      this.freeProgress = 0;
+      this.release(p);
+    }
+  }
+
+  private release(p: PlayerState) {
+    p.jailed = false;
+    p.x = JAIL.exits[p.seat].x;
+    p.y = JAIL.exits[p.seat].y;
+    p.angle = Math.PI / 2;
+    this.events.push({ type: 'freed', seat: p.seat });
   }
 
   private updateCamera(dt: number) {
@@ -422,6 +454,7 @@ export class Game {
     }
     this.events.push({ type: 'capture', seat: p.seat, x: p.x, y: p.y });
     p.jailed = true;
+    p.jailLeft = SOLO_JAIL_TIME;
     p.leave = false;
     p.hold = null;
     p.x = JAIL.cells[p.seat].x;
@@ -431,7 +464,7 @@ export class Game {
   private checkEnd() {
     for (const p of this.players) if (p.leave && (p.jailed || p.carry || !inTruckZone(p))) p.leave = false;
 
-    if (this.players.every((p) => p.jailed)) return this.end('caught');
+    if (!this.solo && this.players.every((p) => p.jailed)) return this.end('caught');
     if (this.players.every((p) => p.leave)) return this.end(this.loot > 0 ? 'escaped' : 'escaped_empty');
     if (this.timeLeft <= 0) {
       const safe = this.players.every((p) => !p.jailed && inTruckZone(p));
@@ -478,6 +511,7 @@ export class Game {
     return {
       t: Math.round(this.time * 1000),
       phase: this.phase,
+      solo: this.solo,
       timeLeft: Math.round(this.timeLeft * 10) / 10,
       countdown: Math.round(this.countdown * 10) / 10,
       you,
@@ -508,7 +542,8 @@ export class Game {
       camera: { enabled: this.cameraEnabled, alarm: this.cameraAlarm > 0 },
       loot: this.loot,
       delivered: this.delivered,
-      freeProgress: Math.round((this.freeProgress / FREE_HOLD_TIME) * 100) / 100,
+      freeProgress: Math.round((this.solo ? this.freeProgress : this.freeProgress / FREE_HOLD_TIME) * 100) / 100,
+      cameraOff: Math.max(0, Math.round((this.cameraOffUntil - this.time) * 10) / 10),
       events,
     };
   }

@@ -86,6 +86,7 @@ export interface GameResult {
 export interface Snapshot {
   t: number;
   phase: GamePhase;
+  solo: boolean;
   timeLeft: number;
   countdown: number;
   you: Seat;
@@ -96,7 +97,10 @@ export interface Snapshot {
   camera: { enabled: boolean; alarm: boolean };
   loot: number;
   delivered: number;
+  /** Libération en cours (en solo : progression de l'évasion du cabanon). */
   freeProgress: number;
+  /** Solo : secondes restantes de caméra coupée. */
+  cameraOff: number;
   events: GameEvent[];
 }
 
@@ -110,6 +114,7 @@ export interface LobbyPlayer {
 export interface LobbyState {
   code: string;
   phase: RoomPhase;
+  solo: boolean;
   you: Seat;
   players: [LobbyPlayer | null, LobbyPlayer | null];
   /** Pause pour déconnexion : siège absent et temps restant (ms). */

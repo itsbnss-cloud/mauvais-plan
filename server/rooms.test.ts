@@ -179,3 +179,29 @@ describe('salons', () => {
     expect(leaked).toBe(false);
   });
 });
+
+describe('mode solo', () => {
+  it('démarre sans salon, refuse les visiteurs et reprend après une reconnexion', async () => {
+    const a = await client();
+    const started = lobbyWhere(a, (l) => l.solo && l.phase === 'countdown');
+    const res = await call(a, 'room:solo', { name: 'Solo' });
+    expect(res).toMatchObject({ ok: true, seat: 0 });
+    if (!res.ok) return;
+    const lobby = await started;
+    expect(lobby.players[1]).toBeNull();
+
+    const snap = await nextSnap(a);
+    expect(snap.solo).toBe(true);
+    expect(snap.players).toHaveLength(1);
+
+    const intruder = await client();
+    expect(await call(intruder, 'room:join', { code: res.code, name: 'Intrus' })).toEqual({ ok: false, error: 'FULL' });
+
+    // Rafraîchissement : la partie se met en pause puis repart avec le seul joueur.
+    a.disconnect();
+    const back = await client();
+    const resumed = lobbyWhere(back, (l) => l.phase === 'countdown');
+    expect(await call(back, 'room:resume', { code: res.code, token: res.token })).toMatchObject({ ok: true, seat: 0 });
+    await resumed;
+  });
+});

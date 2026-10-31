@@ -17,6 +17,8 @@ interface Room {
   code: string;
   seats: [SeatInfo | null, SeatInfo | null];
   game: Game | null;
+  /** Partie à un seul joueur : pas de salon, pas d'invitation. */
+  solo: boolean;
   createdAt: number;
   snapAcc: number;
   lastPhase: RoomPhase;
@@ -65,7 +67,7 @@ export class RoomManager {
         }
       });
 
-    on('room:create', (data: { name?: unknown }, ack: Ack) => {
+    const create = (solo: boolean) => (data: { name?: unknown }, ack: Ack) => {
       if (typeof ack !== 'function') return;
       if (!this.allow(socket.id)) return ack({ ok: false, error: 'RATE_LIMIT' });
       const name = cleanName(data?.name);
@@ -75,6 +77,7 @@ export class RoomManager {
         code: this.newCode(),
         seats: [null, null],
         game: null,
+        solo,
         createdAt: this.now(),
         snapAcc: 0,
         lastPhase: 'lobby',
@@ -82,8 +85,12 @@ export class RoomManager {
       this.rooms.set(room.code, room);
       const token = this.takeSeat(socket, room, 0, name);
       ack({ ok: true, code: room.code, token, seat: 0 });
+      // En solo, on saute le salon : la partie démarre tout de suite.
+      if (solo) this.startGame(room);
       this.broadcastLobby(room);
-    });
+    };
+    on('room:create', create(false));
+    on('room:solo', create(true));
 
     on('room:join', (data: { code?: unknown; name?: unknown }, ack: Ack) => {
       if (typeof ack !== 'function') return;
@@ -92,6 +99,7 @@ export class RoomManager {
       if (!name) return ack({ ok: false, error: 'BAD_NAME' });
       const room = this.rooms.get(normalizeCode(data?.code));
       if (!room) return ack({ ok: false, error: 'NOT_FOUND' });
+      if (room.solo) return ack({ ok: false, error: 'FULL' });
       const seat = SEATS.find((s) => room.seats[s] === null);
       // Siège libre mais partie en cours (abandonnée) : on attend le retour au salon.
       if (seat === undefined || (room.game && room.game.phase !== 'ended')) return ack({ ok: false, error: 'FULL' });
@@ -129,7 +137,7 @@ export class RoomManager {
       if (!ctx || ctx.room.game) return;
       ctx.info.ready = ready === true;
       const { room } = ctx;
-      if (SEATS.every((s) => room.seats[s]?.ready && room.seats[s]?.socketId)) this.startGame(room);
+      if (!room.solo && SEATS.every((s) => room.seats[s]?.ready && room.seats[s]?.socketId)) this.startGame(room);
       this.broadcastLobby(room);
     });
 
@@ -138,13 +146,13 @@ export class RoomManager {
       if (!ctx || ctx.room.game?.phase !== 'ended') return;
       ctx.info.replay = true;
       const { room } = ctx;
-      if (SEATS.every((s) => room.seats[s]?.replay && room.seats[s]?.socketId)) this.startGame(room);
+      if (this.activeSeats(room).every((s) => room.seats[s]?.replay && room.seats[s]?.socketId)) this.startGame(room);
       this.broadcastLobby(room);
     });
 
     on('game:lobby', () => {
       const ctx = this.ctx(socket);
-      if (!ctx || ctx.room.game?.phase !== 'ended') return;
+      if (!ctx || ctx.room.solo || ctx.room.game?.phase !== 'ended') return;
       this.backToLobby(ctx.room);
     });
 
@@ -219,14 +227,18 @@ export class RoomManager {
     }
   }
 
+  private activeSeats(room: Room): Seat[] {
+    return room.solo ? [0] : SEATS;
+  }
+
   private allConnected(room: Room) {
-    return SEATS.every((s) => room.seats[s]?.socketId);
+    return this.activeSeats(room).every((s) => room.seats[s]?.socketId);
   }
 
   // ───────────── Cycle de vie des salons ─────────────
 
   private startGame(room: Room) {
-    room.game = new Game();
+    room.game = new Game({ solo: room.solo });
     room.snapAcc = 1;
     for (const s of SEATS) {
       const info = room.seats[s];
@@ -276,6 +288,7 @@ export class RoomManager {
     return {
       code: room.code,
       phase: room.game ? room.game.phase : 'lobby',
+      solo: room.solo,
       you,
       players: SEATS.map((s) => {
         const info = room.seats[s];

@@ -129,6 +129,15 @@ Après le déploiement, vérifie que `https://ton-domaine/health` répond `{"ok"
 - **Caméra** : elle surveille l'entrée du salon. Si elle repère quelqu'un, le gardien vient voir. Maintenir E sur le boîtier électrique, sur la façade côté jardin, la coupe.
 - **Fin** : les deux joueurs au camion appuient sur E pour partir tout de suite. À la fin du chrono, l'évasion ne réussit que si les deux sont dans la zone de fuite.
 
+### Mode solo
+
+Le bouton **Jouer seul** de l'accueil lance directement une partie à un seul cambrioleur, sans salon ni invitation. Les règles s'adaptent :
+
+- les **gros objets** se portent seul, mais plus lentement ;
+- **attrapé**, on reste 10 s au cabanon puis on s'évade seul, et le chrono continue de tourner pendant ce temps ;
+- un **appui sur E** au boîtier électrique coupe la caméra pendant 8 s ;
+- on part seul avec E au camion.
+
 ---
 
 ## 5. Architecture

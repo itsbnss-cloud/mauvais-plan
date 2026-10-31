@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { CAMERA_HALF_ANGLE, CAMERA_RANGE, GUARD_VIEW_HALF_ANGLE, GUARD_VIEW_RANGE, INPUT_DT, WORLD_H, WORLD_W } from '../../../shared/constants';
+import { CAMERA_HALF_ANGLE, CAMERA_RANGE, GUARD_VIEW_HALF_ANGLE, GUARD_VIEW_RANGE, INPUT_DT, SOLO_CAMERA_OFF_TIME, SOLO_JAIL_TIME, WORLD_H, WORLD_W } from '../../../shared/constants';
 import { angleDiff, raycast, type Vec } from '../../../shared/geometry';
 import { CAMERA, ITEM_BY_ID, JAIL, ROOMS, SWITCH_POS, TRUCK_RECT, TRUCK_ZONE, VISION_BLOCKERS } from '../../../shared/map';
 import { bigItemObstacles, findInteraction, stepPlayer } from '../../../shared/rules';
@@ -339,6 +339,14 @@ export class GameScene extends Phaser.Scene {
       const pb = b.players[seat];
       const cur = s.players[seat];
       const view = this.players[seat];
+      // Solo : le deuxième cambrioleur n'existe pas.
+      const present = !!cur && !!pa && !!pb;
+      for (const o of [view.body, view.shadow, view.label]) o.setVisible(present);
+      if (!present) {
+        view.carried.setVisible(false);
+        view.badge.setVisible(false);
+        continue;
+      }
       let x = lerp(pa.x, pb.x, t);
       let y = lerp(pa.y, pb.y, t);
       // Téléportation (capture, libération) : pas d'interpolation.
@@ -465,9 +473,8 @@ export class GameScene extends Phaser.Scene {
     const blink = Math.floor(this.time.now / 400) % 2 === 0;
     this.camLed.setTint(cam.alarm ? 0xff3b3b : 0xff6b6b).setVisible(cam.enabled && (cam.alarm || blink));
     this.camSprite.setAlpha(cam.enabled ? 1 : 0.55);
-    this.camOff.setVisible(!cam.enabled);
-    const held = s.players.some((p) => p.hold === 'switch');
-    this.switchSprite.setTexture(held ? 'switch_off' : 'switch_on');
+    this.camOff.setVisible(!cam.enabled).setText(s.cameraOff > 0 ? `OFF ${Math.ceil(s.cameraOff)} s` : 'OFF');
+    this.switchSprite.setTexture(cam.enabled ? 'switch_on' : 'switch_off');
     this.lock.setVisible(s.players.some((p) => p.jailed));
     // Progression de libération autour du cadenas, visible des deux côtés.
     if (s.freeProgress > 0) this.drawProgress(JAIL.lock.x, JAIL.lock.y - 16, s.freeProgress);
@@ -520,11 +527,13 @@ export class GameScene extends Phaser.Scene {
     const pos = this.myDisplayPos(s) ?? me;
     let text = '';
     if (s.phase !== 'playing') text = '';
+    else if (me.jailed && s.solo) text = `Enfermé ! Tu crochètes le cadenas…\nÉvasion dans ${Math.max(1, Math.ceil(SOLO_JAIL_TIME * (1 - s.freeProgress)))} s`;
     else if (me.jailed) text = `Enfermé ! ${partner} peut te libérer\nen maintenant E au cadenas`;
     else if (me.carry?.kind === 'small') text = `Apporte-le au camion · Espace : lâcher`;
     else if (me.carry?.kind === 'big') {
       const it = s.items.find((i) => i.id === me.carry!.item)!;
-      if (it.state === 'idle') text = `En attente de ${partner} à l'autre poignée…\nEspace : lâcher`;
+      if (s.solo) text = it.push === 'blocked' ? 'Ça coince ! Essaie un autre angle' : it.push === 'wait' ? 'C’est lourd… tire-le jusqu’au camion\nEspace : lâcher' : '';
+      else if (it.state === 'idle') text = `En attente de ${partner} à l'autre poignée…\nEspace : lâcher`;
       else if (it.push === 'opposed') text = 'Poussez dans la même direction !';
       else if (it.push === 'blocked') text = 'Ça coince ! Essayez un autre angle';
       else if (it.push === 'wait') text = 'Avancez ensemble · Espace : lâcher';
@@ -535,11 +544,14 @@ export class GameScene extends Phaser.Scene {
       const players = s.players.map((p, i) => (i === s.you ? { ...p, x: pos.x, y: pos.y } : p));
       const inter = findInteraction(players, s.items, s.you);
       if (inter?.type === 'free') text = `Maintiens E : libérer ${partner}`;
+      else if (inter?.type === 'switch' && s.solo) text = s.cameraOff > 0 ? `Caméra coupée (${Math.ceil(s.cameraOff)} s)` : `E : couper la caméra ${SOLO_CAMERA_OFF_TIME} s`;
       else if (inter?.type === 'switch') text = me.hold === 'switch' ? 'Caméra coupée ! Garde E enfoncé' : 'Maintiens E : couper la caméra';
-      else if (inter?.type === 'grab') text = `E : saisir ${ITEM_BY_ID[inter.item].name} (à deux)`;
+      else if (inter?.type === 'grab') text = `E : saisir ${ITEM_BY_ID[inter.item].name} (${s.solo ? 'lourd !' : 'à deux'})`;
       else if (inter?.type === 'pick') {
         const d = ITEM_BY_ID[inter.item];
         text = `E : prendre ${d.name} (${d.value} €)`;
+      } else if (inter?.type === 'leave' && s.solo) {
+        text = 'E : partir avec le butin';
       } else if (inter?.type === 'leave') {
         const ready = s.players.filter((p) => p.leave).length;
         text = `E : partir (${ready}/2 prêts)`;
@@ -632,7 +644,11 @@ export class GameScene extends Phaser.Scene {
           this.cameras.main.shake(220, 0.006);
           sfx.capture();
           this.bridge.toast(
-            ev.seat === you ? 'Le gardien t’a attrapé ! Direction le cabanon.' : `${partner} est au cabanon ! Maintiens E devant le cadenas pour le libérer.`,
+            s.solo
+              ? `Le gardien t’a attrapé ! ${SOLO_JAIL_TIME} s au cabanon.`
+              : ev.seat === you
+                ? 'Le gardien t’a attrapé ! Direction le cabanon.'
+                : `${partner} est au cabanon ! Maintiens E devant le cadenas pour le libérer.`,
             'bad',
           );
           break;
@@ -647,14 +663,14 @@ export class GameScene extends Phaser.Scene {
         case 'cameraAlert':
           this.camFlash = 0.8;
           sfx.camera();
-          this.bridge.toast('La caméra vous a repérés ! Le gardien vient voir.', 'bad');
+          this.bridge.toast(`La caméra ${s.solo ? 't’a repéré' : 'vous a repérés'} ! Le gardien vient voir.`, 'bad');
           break;
         case 'guardAlert':
           sfx.alert();
           this.bridge.toast(ev.seat === you ? 'Le gardien t’a repéré ! Cours !' : `Le gardien poursuit ${partner} !`, 'bad');
           break;
         case 'guardLost':
-          this.bridge.toast('Ouf… le gardien a perdu votre trace.', 'good');
+          this.bridge.toast(`Ouf… le gardien a perdu ${s.solo ? 'ta' : 'votre'} trace.`, 'good');
           break;
         case 'leave':
           if (ev.seat !== you) this.bridge.toast(`${nameOf(ev.seat)} est prêt à partir : rejoins le camion et appuie sur E.`, 'info');

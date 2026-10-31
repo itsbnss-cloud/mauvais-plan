@@ -162,15 +162,17 @@ function readName(): string | null {
   return name;
 }
 
-function enterRoom(res: JoinAck) {
+function enterRoom(res: JoinAck, solo = false) {
   if (!res.ok) {
     $('home-error').textContent = ERRORS[res.error];
     return;
   }
   session = { code: res.code, token: res.token };
   saveSession(session);
+  // Pas de code dans l'adresse en solo : il n'y a personne à inviter.
   const url = new URL(location.href);
-  url.searchParams.set('code', res.code);
+  if (solo) url.searchParams.delete('code');
+  else url.searchParams.set('code', res.code);
   history.replaceState(null, '', url);
 }
 
@@ -192,6 +194,16 @@ $('btn-create').addEventListener('click', () =>
     if (!name) return;
     $('home-error').textContent = '';
     enterRoom(await request('room:create', { name }));
+  }),
+);
+
+$('btn-solo').addEventListener('click', () =>
+  withBusy(async () => {
+    unlockAudio();
+    const name = readName();
+    if (!name) return;
+    $('home-error').textContent = '';
+    enterRoom(await request('room:solo', { name }), true);
   }),
 );
 
@@ -244,12 +256,13 @@ $('btn-ready').addEventListener('click', () => {
   socket.emit('room:ready', !me?.ready);
 });
 
-$('btn-leave').addEventListener('click', () => {
+function leaveRoom() {
   socket.emit('room:leave');
   saveSession(null);
   session = null;
   showHome();
-});
+}
+$('btn-leave').addEventListener('click', leaveRoom);
 
 function fmtTime(sec: number) {
   const s = Math.max(0, Math.ceil(sec));
@@ -383,12 +396,14 @@ function updateHud(s: Snapshot) {
   cam.className = `chip ${!s.camera.enabled ? 'off' : s.camera.alarm ? 'alarm' : 'on'}`;
   cam.textContent = !s.camera.enabled ? 'Coupée' : s.camera.alarm ? 'Alerte !' : 'Active';
 
+  const block = $('hud-partner-name').closest<HTMLElement>('.partner-block')!;
+  block.classList.toggle('hidden', s.solo);
+  if (s.solo) return;
   const otherSeat = s.you === 0 ? 1 : 0;
   $('hud-partner-name').textContent = names[otherSeat] || 'Complice';
   $('hud-partner-dot').style.background = otherSeat === 0 ? 'var(--violet)' : 'var(--orange)';
   const [status, cls] = partnerStatus(s);
   $('hud-partner-status').textContent = status;
-  const block = $('hud-partner-name').closest('.partner-block')!;
   block.classList.toggle('bad', cls === 'bad');
   block.classList.toggle('away', cls === 'away');
 }
@@ -460,6 +475,7 @@ function renderEnd(l: LobbyState) {
           ? 'Vous filez avec un beau butin. Personne ne saura jamais.'
           : 'Vous filez avec un petit butin… c’est déjà ça.';
   }
+  if (l.solo) sub = soloSub(r) ?? sub;
   $('end-sub').textContent = sub;
   $('end-loot').textContent = `${r.loot} €`;
   $('end-items').textContent = `${r.delivered} / ${r.total}`;
@@ -472,7 +488,12 @@ function renderEnd(l: LobbyState) {
   const other = l.players[otherSeat];
   const replay = $<HTMLButtonElement>('btn-replay');
   const status = $('end-replay-status');
-  if (!other) {
+  $('btn-to-lobby').textContent = l.solo ? 'Menu principal' : 'Retour au salon';
+  if (l.solo) {
+    replay.disabled = !!me?.replay;
+    replay.textContent = 'Rejouer';
+    status.textContent = '';
+  } else if (!other) {
     replay.disabled = true;
     replay.textContent = 'Rejouer';
     status.textContent = 'Retourne au salon pour inviter un nouveau complice.';
@@ -487,8 +508,26 @@ function renderEnd(l: LobbyState) {
   }
 }
 
+/** Textes de fin au singulier pour le mode solo. */
+function soloSub(r: GameResult): string | null {
+  switch (r.outcome) {
+    case 'escaped':
+      return r.delivered === r.total
+        ? 'Le camion est plein à craquer. Casse parfait, et tout seul !'
+        : r.delivered >= 3
+          ? 'Tu files avec un beau butin. Personne ne saura jamais.'
+          : 'Tu files avec un petit butin… c’est déjà ça.';
+    case 'escaped_empty':
+      return 'Tu t’es échappé, mais le camion est vide. Un plan parfait… pour rien.';
+    case 'timeout':
+      return 'Le temps est écoulé et tu n’étais pas au camion. Les sirènes approchent…';
+    default:
+      return null;
+  }
+}
+
 $('btn-replay').addEventListener('click', () => socket.emit('game:replay'));
-$('btn-to-lobby').addEventListener('click', () => socket.emit('game:lobby'));
+$('btn-to-lobby').addEventListener('click', () => (lobby?.solo ? leaveRoom() : socket.emit('game:lobby')));
 
 function applyLobby(l: LobbyState) {
   lobby = l;

@@ -203,6 +203,10 @@ input[type='text']:focus {
   padding: 14px 18px;
 }
 
+#btn-solo {
+  margin-top: 10px;
+}
+
 .btn.ghost {
   background: transparent;
   box-shadow: none;

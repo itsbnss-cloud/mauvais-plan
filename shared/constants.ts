@@ -43,6 +43,11 @@ export const GAME_DURATION = 300;
 export const COUNTDOWN = 3;
 export const RECONNECT_GRACE_MS = 60_000;
 
+// Mode solo : règles adaptées à un seul cambrioleur.
+export const SOLO_BIG_SPEED = 60;
+export const SOLO_JAIL_TIME = 10;
+export const SOLO_CAMERA_OFF_TIME = 8;
+
 export const MAX_NAME_LENGTH = 16;
 export const ITEM_COUNT = 6;
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { COUNTDOWN, GAME_DURATION, INPUT_DT, PLAYER_RADIUS } from '../shared/constants';
+import { CARRY_BIG_SPEED, COUNTDOWN, GAME_DURATION, INPUT_DT, PLAYER_RADIUS, SOLO_BIG_SPEED, SOLO_CAMERA_OFF_TIME, SOLO_JAIL_TIME } from '../shared/constants';
 import { circleHitsAny, rectHitsAny } from '../shared/geometry';
 import { CAMERA, GUARD_PATROL, ITEMS, JAIL, STATIC_OBSTACLES, SWITCH_POS, TRUCK_ZONE, bigItemRect, handlePos } from '../shared/map';
 import type { InputCmd, Seat } from '../shared/types';
@@ -8,8 +8,8 @@ import { NavGrid } from './nav';
 
 type Cmd = Partial<Omit<InputCmd, 'seq'>>;
 
-function setup() {
-  const g = new Game();
+function setup(opts: { solo?: boolean } = {}) {
+  const g = new Game(opts);
   g.tick(COUNTDOWN + 0.01);
   expect(g.phase).toBe('playing');
   return { g, seq: [0, 0] };
@@ -475,5 +475,82 @@ describe('carte', () => {
         expect(circleHitsAny(p.x, p.y, PLAYER_RADIUS, STATIC_OBSTACLES), `${id}/${h}`).toBe(false);
       }
     }
+  });
+});
+
+describe('mode solo', () => {
+  it('un seul cambrioleur, les commandes d’un second siège sont ignorées', () => {
+    const ctx = setup({ solo: true });
+    expect(ctx.g.players).toHaveLength(1);
+    step(ctx, [{ x: 1 }, { x: 1 }], 5);
+    const snap = ctx.g.snapshot(0, []);
+    expect(snap.solo).toBe(true);
+    expect(snap.players).toHaveLength(1);
+  });
+
+  it('porte seul un gros objet, plus lentement, jusqu’au camion', () => {
+    const ctx = setup({ solo: true });
+    const { g } = ctx;
+    parkGuard(g);
+    const it = item(g, 'clock');
+    const h = handlePos(it.x, it.y, it.def, 0);
+    place(g, 0, h.x, h.y);
+    step(ctx, [{ e: true }]);
+    step(ctx);
+    expect(it.state).toBe('carried');
+    const y0 = it.y;
+    step(ctx, [{ y: -1 }], 30);
+    expect(y0 - it.y).toBeGreaterThan(SOLO_BIG_SPEED * 0.8);
+    expect(y0 - it.y).toBeLessThan(CARRY_BIG_SPEED * 0.8);
+
+    const go = (x: number, y: number, until: () => boolean) => {
+      for (let i = 0; i < 900 && !until(); i++) step(ctx, [{ x, y }]);
+      expect(until()).toBe(true);
+    };
+    go(0, -1, () => it.y <= 176);
+    go(-1, 0, () => it.x <= 730);
+    go(0, -1, () => it.y <= 130);
+    go(-1, 0, () => it.x <= 460);
+    go(0, 1, () => it.y >= 200);
+    go(-1, 0, () => it.x <= 268);
+    go(0, 1, () => it.state === 'delivered');
+    expect(g.loot).toBe(600);
+    expect(g.players[0].carry).toBeNull();
+  });
+
+  it('attrapé : s’évade seul du cabanon après le délai, sans perdre la partie', () => {
+    const ctx = setup({ solo: true });
+    const { g } = ctx;
+    parkGuard(g);
+    g.capture(g.players[0]);
+    step(ctx, [], Math.round((SOLO_JAIL_TIME - 0.5) / INPUT_DT));
+    expect(g.phase).toBe('playing');
+    expect(g.players[0].jailed).toBe(true);
+    expect(g.freeProgress).toBeGreaterThan(0.9);
+    step(ctx, [], Math.round(1 / INPUT_DT));
+    expect(g.players[0].jailed).toBe(false);
+    expect(g.players[0].y).toBeGreaterThan(JAIL.outer.y + JAIL.outer.h);
+  });
+
+  it('un appui sur l’interrupteur coupe la caméra quelques secondes', () => {
+    const ctx = setup({ solo: true });
+    const { g } = ctx;
+    parkGuard(g);
+    place(g, 0, SWITCH_POS.x - 10, SWITCH_POS.y);
+    step(ctx, [{ e: true }]);
+    step(ctx, [{ e: false }], Math.round((SOLO_CAMERA_OFF_TIME - 0.5) / INPUT_DT));
+    expect(g.cameraEnabled).toBe(false);
+    step(ctx, [], Math.round(1 / INPUT_DT));
+    expect(g.cameraEnabled).toBe(true);
+  });
+
+  it('part seul avec E au camion', () => {
+    const ctx = setup({ solo: true });
+    const { g } = ctx;
+    parkGuard(g);
+    place(g, 0, TRUCK_ZONE.x + TRUCK_ZONE.w / 2, TRUCK_ZONE.y + TRUCK_ZONE.h / 2);
+    step(ctx, [{ e: true }]);
+    expect(g.phase).toBe('ended');
+    expect(g.result?.outcome).toBe('escaped_empty');
   });
 });
