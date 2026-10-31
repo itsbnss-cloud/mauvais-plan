@@ -5,7 +5,8 @@ import './style.css';
 import Phaser from 'phaser';
 import { io } from 'socket.io-client';
 import { WORLD_H, WORLD_W } from '../../shared/constants';
-import { ITEMS, ITEM_BY_ID } from '../../shared/map';
+import { DEFAULT_LEVEL, LEVELS, getLevel } from '../../shared/levels';
+import { ITEM_CATALOG } from '../../shared/map';
 import type { GameResult, JoinAck, JoinError, LobbyState, RoomPhase, Seat, Snapshot } from '../../shared/types';
 import { GameScene } from './game/GameScene';
 import { ICON_SOUND_OFF, ICON_SOUND_ON, thiefSvg } from './portrait';
@@ -115,7 +116,7 @@ function showScreen(name: ScreenName) {
   for (const n of ['home', 'lobby', 'game'] as ScreenName[]) $(`screen-${n}`).classList.toggle('hidden', n !== name);
   if (name === 'game') {
     phaser?.scale.refresh();
-    scene?.setInputEnabled(true);
+    scene?.setInputEnabled(!keypadGate);
   } else {
     scene?.setInputEnabled(false);
   }
@@ -146,6 +147,47 @@ if (urlCode) {
   codeInput.value = urlCode.toUpperCase().slice(0, 5);
   $('btn-join').classList.add('primary');
 }
+
+// Choix du niveau
+let homeLevel = DEFAULT_LEVEL;
+try {
+  homeLevel = getLevel(localStorage.getItem('mp.level')).id;
+} catch {
+  /* stockage indisponible */
+}
+
+function renderLevels(el: HTMLElement, selected: string, onPick: (id: string) => void) {
+  el.replaceChildren();
+  for (const lv of LEVELS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `level-card${lv.id === selected ? ' selected' : ''}`;
+    const stars = [1, 2, 3].map((i) => `<span class="${i <= lv.stars ? '' : 'off'}">★</span>`).join('');
+    btn.innerHTML = `<span class="lv-stars">${stars}</span><b></b>`;
+    btn.querySelector('b')!.textContent = lv.name;
+    btn.title = lv.blurb;
+    btn.addEventListener('click', () => onPick(lv.id));
+    el.append(btn);
+  }
+  const desc = document.createElement('p');
+  desc.className = 'level-desc';
+  desc.style.gridColumn = '1 / -1';
+  desc.textContent = getLevel(selected).blurb;
+  el.append(desc);
+}
+
+function renderHomeLevels() {
+  renderLevels($('home-levels'), homeLevel, (id) => {
+    homeLevel = id;
+    try {
+      localStorage.setItem('mp.level', id);
+    } catch {
+      /* stockage indisponible */
+    }
+    renderHomeLevels();
+  });
+}
+renderHomeLevels();
 
 function readName(): string | null {
   const name = nameInput.value.trim();
@@ -193,7 +235,7 @@ $('btn-create').addEventListener('click', () =>
     const name = readName();
     if (!name) return;
     $('home-error').textContent = '';
-    enterRoom(await request('room:create', { name }));
+    enterRoom(await request('room:create', { name, level: homeLevel }));
   }),
 );
 
@@ -203,7 +245,7 @@ $('btn-solo').addEventListener('click', () =>
     const name = readName();
     if (!name) return;
     $('home-error').textContent = '';
-    enterRoom(await request('room:solo', { name }), true);
+    enterRoom(await request('room:solo', { name, level: homeLevel }), true);
   }),
 );
 
@@ -311,6 +353,8 @@ function renderLobby(l: LobbyState) {
     el.append(art.firstElementChild!, info);
   }
 
+  renderLevels($('lobby-levels'), l.level, (id) => socket.emit('room:level', id));
+
   const me = l.players[l.you];
   const other = l.players[l.you === 0 ? 1 : 0];
   const btn = $<HTMLButtonElement>('btn-ready');
@@ -339,6 +383,7 @@ function ensureGame() {
     names: () => names,
     onSnapshot: updateHud,
     toast,
+    openKeypad,
   });
   phaser = new Phaser.Game({
     type: Phaser.AUTO,
@@ -357,8 +402,17 @@ function ensureGame() {
 
 // HUD
 const slotsEl = $('hud-slots');
-slotsEl.innerHTML = ITEMS.map((it) => `<i data-id="${it.id}" class="${it.kind === 'big' ? 'big' : ''}" title="${it.name} (${it.value} €)"></i>`).join('');
+let hudLevel = '';
 let lastLoot = -1;
+
+/** Cases du butin et libellés qui dépendent du niveau. */
+function setHudLevel(id: string) {
+  if (id === hudLevel) return;
+  hudLevel = id;
+  const level = getLevel(id);
+  slotsEl.innerHTML = level.items.map((it) => `<i data-id="${it.id}" class="${it.kind === 'big' ? 'big' : ''}" title="${it.name} (${it.value} €)"></i>`).join('');
+  $('hud-cam-label').textContent = level.lasers.length ? 'Caméras + lasers' : level.cameras.length > 1 ? 'Caméras' : 'Caméra';
+}
 
 function partnerStatus(s: Snapshot): [string, string] {
   const other = s.players[s.you === 0 ? 1 : 0];
@@ -370,7 +424,7 @@ function partnerStatus(s: Snapshot): [string, string] {
   if (other.leave) return ['Prêt à partir', ''];
   if (other.carry) {
     const it = s.items.find((i) => i.id === other.carry!.item);
-    const name = ITEM_BY_ID[other.carry.item].name;
+    const name = ITEM_CATALOG[other.carry.item].name;
     if (other.carry.kind === 'big' && it?.state === 'idle') return [`T’attend : ${name}`, ''];
     return [`Porte : ${name}`, ''];
   }
@@ -378,6 +432,9 @@ function partnerStatus(s: Snapshot): [string, string] {
 }
 
 function updateHud(s: Snapshot) {
+  setHudLevel(s.level);
+  renderClues(s);
+  if (keypadGate && (s.phase !== 'playing' || s.players[s.you].jailed || s.gates.find((g) => g.id === keypadGate)?.open)) closeKeypad();
   const timerBlock = $('hud-timer').parentElement!;
   $('hud-timer').textContent = fmtTime(s.timeLeft);
   timerBlock.classList.toggle('urgent', s.phase === 'playing' && s.timeLeft <= 30);
@@ -407,6 +464,112 @@ function updateHud(s: Snapshot) {
   block.classList.toggle('bad', cls === 'bad');
   block.classList.toggle('away', cls === 'away');
 }
+
+// Carnet d'indices
+let lastClues = '';
+function renderClues(s: Snapshot) {
+  const level = getLevel(s.level);
+  const key = `${s.level}|${s.clues.map((c) => c.text).join('|')}`;
+  if (key === lastClues) return;
+  lastClues = key;
+  const box = $('clues');
+  const codeGates = level.gates.filter((g) => g.lock.type === 'code');
+  box.classList.toggle('hidden', !codeGates.length);
+  if (!codeGates.length) return;
+  const total = codeGates.reduce((n, g) => n + (g.lock.type === 'code' ? g.lock.notes.length : 0), 0);
+  const list = $('clues-list');
+  list.replaceChildren();
+  for (const c of s.clues) {
+    const li = document.createElement('li');
+    li.textContent = c.text;
+    list.append(li);
+  }
+  if (!s.clues.length) {
+    const li = document.createElement('li');
+    li.textContent = 'Aucun pour l’instant : cherche les papiers jaunes.';
+    list.append(li);
+  }
+  $('clues-tip').textContent = `${s.clues.length}/${total} papiers lus${s.solo ? '' : ' · ton complice ne voit pas les tiens, dis-les-lui !'}`;
+}
+
+// Digicode
+let keypadGate: string | null = null;
+let keypadCode = '';
+let keypadBusy = false;
+const keypadDisplay = $('keypad-display');
+
+function keypadLength() {
+  const g = lobby ? getLevel(lobby.level).gates.find((x) => x.id === keypadGate) : null;
+  return g?.lock.type === 'code' ? g.lock.notes.length : 4;
+}
+
+function renderKeypad() {
+  keypadDisplay.textContent = keypadCode.padEnd(keypadLength(), '_');
+}
+
+function openKeypad(gate: string) {
+  if (keypadGate) return;
+  keypadGate = gate;
+  keypadCode = '';
+  keypadDisplay.className = 'keypad-display';
+  $('keypad-msg').textContent = 'Tape les chiffres au clavier ou clique. Échap pour fermer.';
+  renderKeypad();
+  $('overlay-keypad').classList.remove('hidden');
+  scene?.setInputEnabled(false);
+}
+
+function closeKeypad() {
+  if (!keypadGate) return;
+  keypadGate = null;
+  $('overlay-keypad').classList.add('hidden');
+  const ended = lobby?.phase === 'ended';
+  if (lobby && !ended && !lobby.pause) scene?.setInputEnabled(true);
+}
+
+function keypadPress(k: string) {
+  if (!keypadGate || keypadBusy) return;
+  if (k === 'back') keypadCode = keypadCode.slice(0, -1);
+  else if (k === 'ok') return submitKeypad();
+  else if (/^[0-9]$/.test(k) && keypadCode.length < keypadLength()) keypadCode += k;
+  keypadDisplay.className = 'keypad-display';
+  renderKeypad();
+  if (keypadCode.length === keypadLength()) submitKeypad();
+}
+
+function submitKeypad() {
+  if (!keypadGate || keypadBusy || keypadCode.length < keypadLength()) return;
+  keypadBusy = true;
+  const gate = keypadGate;
+  socket.timeout(4000).emit('keypad', { gate, code: keypadCode }, (err: Error | null, ok: boolean) => {
+    keypadBusy = false;
+    if (keypadGate !== gate) return;
+    if (!err && ok) {
+      keypadDisplay.className = 'keypad-display right';
+      setTimeout(closeKeypad, 450);
+      return;
+    }
+    keypadDisplay.className = 'keypad-display wrong';
+    $('keypad-msg').textContent = 'Faux ! Le digicode a bipé… Vérifie tes indices.';
+    keypadCode = '';
+    setTimeout(renderKeypad, 400);
+  });
+}
+
+for (const b of document.querySelectorAll<HTMLButtonElement>('.keypad-grid button')) {
+  b.addEventListener('click', () => {
+    keypadPress(b.dataset.k!);
+    b.blur();
+  });
+}
+window.addEventListener('keydown', (e) => {
+  if (!keypadGate) return;
+  if (e.key === 'Escape') closeKeypad();
+  else if (e.key === 'Backspace') keypadPress('back');
+  else if (e.key === 'Enter') keypadPress('ok');
+  else if (/^[0-9]$/.test(e.key)) keypadPress(e.key);
+  else return;
+  e.preventDefault();
+});
 
 const toastTimes = new Map<string, number>();
 function toast(msg: string, tone: 'info' | 'good' | 'bad' = 'info') {
@@ -489,6 +652,12 @@ function renderEnd(l: LobbyState) {
   const replay = $<HTMLButtonElement>('btn-replay');
   const status = $('end-replay-status');
   $('btn-to-lobby').textContent = l.solo ? 'Menu principal' : 'Retour au salon';
+  const idx = LEVELS.findIndex((lv) => lv.id === l.level);
+  const next = LEVELS[idx + 1];
+  const showNext = l.solo && !!next && o.escaped && r.loot > 0;
+  $('btn-next').classList.toggle('hidden', !showNext);
+  $('btn-next').textContent = next ? `Niveau suivant : ${next.name}` : '';
+  replay.classList.toggle('primary', !showNext);
   if (l.solo) {
     replay.disabled = !!me?.replay;
     replay.textContent = 'Rejouer';
@@ -527,6 +696,11 @@ function soloSub(r: GameResult): string | null {
 }
 
 $('btn-replay').addEventListener('click', () => socket.emit('game:replay'));
+$('btn-next').addEventListener('click', () => {
+  const idx = LEVELS.findIndex((lv) => lv.id === lobby?.level);
+  const next = LEVELS[idx + 1];
+  if (next) socket.emit('room:level', next.id);
+});
 $('btn-to-lobby').addEventListener('click', () => (lobby?.solo ? leaveRoom() : socket.emit('game:lobby')));
 
 function applyLobby(l: LobbyState) {
@@ -537,6 +711,8 @@ function applyLobby(l: LobbyState) {
 
   if (l.pause) pauseDeadline = performance.now() + l.pause.remainingMs;
 
+  setHudLevel(l.level);
+  if (l.phase !== 'playing') closeKeypad();
   if (l.phase === 'lobby') {
     $('overlay-end').classList.add('hidden');
     $('overlay-pause').classList.add('hidden');
@@ -563,7 +739,7 @@ function applyLobby(l: LobbyState) {
 
   const ended = l.phase === 'ended';
   $('overlay-end').classList.toggle('hidden', !ended);
-  scene?.setInputEnabled(!ended && !paused);
+  scene?.setInputEnabled(!ended && !paused && !keypadGate);
   if (ended) {
     renderEnd(l);
     if (from !== 'ended' && l.result) (OUTCOMES[l.result.outcome].escaped && l.result.loot > 0 ? sfx.win : sfx.lose)();

@@ -1,8 +1,9 @@
 // Décor statique dessiné une fois puis converti en texture.
 import Phaser from 'phaser';
 import { WORLD_H, WORLD_W } from '../../../shared/constants';
-import type { Rect } from '../../../shared/geometry';
-import { DOORS, FURNITURE, HOUSE, JAIL, ROOMS, TRUCK_ZONE, WALL, WALLS, type Furniture, type Room } from '../../../shared/map';
+import { rectsOverlap, type Rect } from '../../../shared/geometry';
+import type { Level } from '../../../shared/levels';
+import { EXTERIOR_DOORS, HOUSE, JAIL, TRUCK_ZONE, WALL, type Door, type Furniture, type Room } from '../../../shared/map';
 import { OUTLINE, roundBox } from './art';
 
 type G = Phaser.GameObjects.Graphics;
@@ -73,7 +74,7 @@ function drawGarden(g: G) {
     }
   }
   // Tapis devant les portes extérieures.
-  for (const d of DOORS.filter((dd) => dd.exterior)) {
+  for (const d of EXTERIOR_DOORS) {
     const cy = d.rect.y + d.rect.h / 2;
     roundBox(g, HOUSE.left - 40, cy - 22, 22, 44, 4, 0xb5523b, 1.5);
     g.fillStyle(0xd98a5f);
@@ -127,6 +128,44 @@ function drawFloor(g: G, room: Room) {
           g.lineStyle(1, 0x95663a, 0.7);
           if ((r + c) % 2) for (let k = 7; k < cw; k += 7) g.lineBetween(tx + k, ty, tx + k, ty + ch);
           else for (let k = 7; k < ch; k += 7) g.lineBetween(tx, ty + k, tx + cw, ty + k);
+        }
+      break;
+    }
+    case 'marble': {
+      const s = 46;
+      for (let ty = y, r = 0; ty < y + h; ty += s, r++)
+        for (let tx = x, c = 0; tx < x + w; tx += s, c++) {
+          g.fillStyle((r + c) % 2 ? 0xeeeae4 : 0xdcd6cd);
+          g.fillRect(tx, ty, Math.min(s, x + w - tx), Math.min(s, y + h - ty));
+        }
+      g.lineStyle(1, 0xc4bdb2, 0.6);
+      for (let i = 0; i < 14; i++) {
+        const vx = x + rand() * w;
+        const vy = y + rand() * h;
+        g.lineBetween(vx, vy, Math.min(x + w, vx + 20 + rand() * 30), Math.min(y + h, vy + 8 + rand() * 14));
+      }
+      break;
+    }
+    case 'velvet': {
+      g.fillStyle(0x8c2f4a);
+      g.fillRect(x, y, w, h);
+      g.fillStyle(0x9e3b58);
+      for (let ty = y + 12; ty < y + h; ty += 24) for (let tx = x + ((ty / 24) % 2) * 12 + 6; tx < x + w; tx += 24) g.fillCircle(tx, ty, 2.4);
+      g.lineStyle(3, 0xd9a440, 0.7);
+      g.strokeRect(x + 14, y + 14, w - 28, h - 28);
+      break;
+    }
+    case 'steel': {
+      const s = 40;
+      g.fillStyle(0x8d96a8);
+      g.fillRect(x, y, w, h);
+      for (let ty = y; ty < y + h; ty += s)
+        for (let tx = x; tx < x + w; tx += s) {
+          g.lineStyle(1.5, 0x6f788a);
+          g.strokeRect(tx, ty, Math.min(s, x + w - tx), Math.min(s, y + h - ty));
+          g.fillStyle(0xa9b1c1);
+          g.fillCircle(tx + 5, ty + 5, 1.6);
+          g.fillCircle(tx + s - 5, ty + s - 5, 1.6);
         }
       break;
     }
@@ -394,6 +433,58 @@ function drawFurniture(g: G, f: Furniture) {
       }
       return;
     }
+    case 'pedestal': {
+      shadow(g, f.rect, 4);
+      roundBox(g, x, y, w, h, 4, 0xe4ded3);
+      g.fillStyle(0xf3efe8);
+      g.fillRect(x + 4, y + 4, w - 8, h - 8);
+      g.fillStyle(0xd9a440);
+      g.fillRect(x + 6, y + h - 9, w - 12, 4);
+      return;
+    }
+    case 'vitrine': {
+      shadow(g, f.rect, 4);
+      roundBox(g, x, y, w, h, 4, 0x6b4a33);
+      g.fillStyle(0xbfe6ff, 0.85);
+      g.fillRect(x + 4, y + 4, w - 8, h - 8);
+      g.fillStyle(0xffffff, 0.7);
+      g.fillRect(x + 8, y + 6, 4, h - 12);
+      g.fillStyle(0x8c2f4a);
+      g.fillRect(x + 16, y + h / 2 - 4, w - 32, 8);
+      return;
+    }
+    case 'bench': {
+      shadow(g, f.rect, 6);
+      roundBox(g, x, y, w, h, 6, 0x6b4a33);
+      g.fillStyle(0x8c2f4a);
+      g.fillRoundedRect(x + 4, y + 4, w - 8, h - 8, 4);
+      g.lineStyle(1.5, 0x6e2238);
+      for (let bx = x + 20; bx < x + w - 10; bx += 20) g.lineBetween(bx, y + 5, bx, y + h - 5);
+      return;
+    }
+    case 'crate': {
+      shadow(g, f.rect, 3);
+      roundBox(g, x, y, w, h, 3, 0xb58350);
+      g.lineStyle(3, 0x8a5f37);
+      g.strokeRect(x + 4, y + 4, w - 8, h - 8);
+      g.lineBetween(x + 4, y + 4, x + w - 4, y + h - 4);
+      g.lineBetween(x + w - 4, y + 4, x + 4, y + h - 4);
+      return;
+    }
+    case 'easel': {
+      g.lineStyle(4, OUTLINE);
+      g.lineBetween(x + 6, y + h, x + w / 2, y);
+      g.lineBetween(x + w - 6, y + h, x + w / 2, y);
+      g.lineStyle(2.5, 0xa36d40);
+      g.lineBetween(x + 6, y + h, x + w / 2, y);
+      g.lineBetween(x + w - 6, y + h, x + w / 2, y);
+      roundBox(g, x + 2, y + 8, w - 4, h - 22, 2, 0xfdf8f0, 2);
+      g.fillStyle(0xff7aa8);
+      g.fillCircle(x + 14, y + 20, 5);
+      g.fillStyle(0x5ab0ff);
+      g.fillRect(x + 20, y + 22, 12, 6);
+      return;
+    }
     default:
       return;
   }
@@ -468,8 +559,12 @@ function drawTruckZone(g: G) {
   for (const yy of [z.y + 40, z.y + 96]) g.fillTriangle(z.x + 20, yy, z.x + 40, yy - 12, z.x + 40, yy + 12);
 }
 
-function drawWindows(g: G) {
+/** Fenêtres de la façade (walls : cloisons intérieures, pour éviter les jonctions). */
+function drawWindows(g: G, walls: Rect[]) {
   const win = (x: number, y: number, w: number, h: number) => {
+    // Pas de fenêtre là où une cloison rejoint la façade.
+    const r = { x: x - 6, y: y - 6, w: w + 12, h: h + 12 };
+    if (walls.some((wl) => rectsOverlap(r, wl))) return;
     g.fillStyle(0xbfe6ff);
     g.fillRect(x, y, w, h);
     g.fillStyle(0xffffff, 0.8);
@@ -484,8 +579,8 @@ function drawWindows(g: G) {
   win(HOUSE.left - t / 2, 590, t, 60);
 }
 
-function drawDoors(g: G) {
-  for (const d of DOORS) {
+function drawDoors(g: G, doors: Door[]) {
+  for (const d of doors) {
     const r = d.rect;
     g.fillStyle(0xb0763e);
     g.fillRect(r.x, r.y, r.w, r.h);
@@ -496,8 +591,9 @@ function drawDoors(g: G) {
 }
 
 /** Dessine tout le décor fixe dans une seule texture. */
-export function makeWorldTexture(scene: Phaser.Scene) {
-  if (scene.textures.exists('world')) return;
+export function makeWorldTexture(scene: Phaser.Scene, level: Level): string {
+  const key = `world_${level.id}`;
+  if (scene.textures.exists(key)) return key;
   const g = scene.make.graphics({ x: 0, y: 0 }, false);
   drawGarden(g);
   drawTruckZone(g);
@@ -505,12 +601,13 @@ export function makeWorldTexture(scene: Phaser.Scene) {
   // Ombre portée de la maison sur la pelouse.
   g.fillStyle(0x000000, 0.18);
   g.fillRect(HOUSE.left + 6, HOUSE.top + 8, HOUSE.right - HOUSE.left, HOUSE.bottom - HOUSE.top);
-  for (const room of ROOMS) drawFloor(g, room);
-  drawDoors(g);
-  for (const f of FURNITURE) if (f.kind === 'rug') drawFurniture(g, f);
-  for (const f of FURNITURE) if (f.kind !== 'rug' && f.kind !== 'truck') drawFurniture(g, f);
-  drawWalls(g, WALLS, 0x46395e, 0x5d4c7a);
-  drawWindows(g);
-  g.generateTexture('world', WORLD_W, WORLD_H);
+  for (const room of level.rooms) drawFloor(g, room);
+  drawDoors(g, level.allDoors);
+  for (const f of level.allFurniture) if (f.kind === 'rug') drawFurniture(g, f);
+  for (const f of level.allFurniture) if (f.kind !== 'rug' && f.kind !== 'truck') drawFurniture(g, f);
+  drawWalls(g, level.allWalls, 0x46395e, 0x5d4c7a);
+  drawWindows(g, level.walls);
+  g.generateTexture(key, WORLD_W, WORLD_H);
   g.destroy();
+  return key;
 }

@@ -1,6 +1,6 @@
 // Textures générées avec les outils graphiques de Phaser : aucun fichier externe.
 import Phaser from 'phaser';
-import { ITEM_BY_ID } from '../../../shared/map';
+import { ITEM_CATALOG } from '../../../shared/map';
 
 export const OUTLINE = 0x2a1f3d;
 const SKIN = 0xf2c4a0;
@@ -319,6 +319,84 @@ function drawItem(g: G, id: string, w: number, h: number) {
       g.fillCircle(cx + 2, y + 47, 3.2);
       break;
     }
+    case 'vase': {
+      g.fillStyle(OUTLINE);
+      g.fillEllipse(cx, cy + 3, 26, 26);
+      g.fillRect(cx - 7, cy - 15, 14, 12);
+      g.fillStyle(0xf4f7ff);
+      g.fillEllipse(cx, cy + 3, 22, 22);
+      g.fillRect(cx - 5, cy - 13, 10, 12);
+      g.fillStyle(0x3a6fd8);
+      g.fillRect(cx - 9, cy, 18, 3);
+      g.fillCircle(cx - 4, cy + 7, 2.5);
+      g.fillCircle(cx + 4, cy + 7, 2.5);
+      g.fillRect(cx - 5, cy - 11, 10, 2);
+      break;
+    }
+    case 'goldbar': {
+      g.fillStyle(OUTLINE);
+      g.fillPoints([{ x: cx - 15, y: cy + 9 }, { x: cx + 15, y: cy + 9 }, { x: cx + 10, y: cy - 7 }, { x: cx - 10, y: cy - 7 }], true);
+      g.fillStyle(0xf4c542);
+      g.fillPoints([{ x: cx - 12, y: cy + 7 }, { x: cx + 12, y: cy + 7 }, { x: cx + 8, y: cy - 5 }, { x: cx - 8, y: cy - 5 }], true);
+      g.fillStyle(0xffe58a);
+      g.fillRect(cx - 7, cy - 4, 14, 3);
+      g.fillStyle(0xd9a720);
+      g.fillRect(cx - 4, cy + 1, 8, 2);
+      break;
+    }
+    case 'diamond': {
+      const pts = (k: number) => [
+        { x: cx - 13 * k, y: cy - 4 * k },
+        { x: cx - 7 * k, y: cy - 11 * k },
+        { x: cx + 7 * k, y: cy - 11 * k },
+        { x: cx + 13 * k, y: cy - 4 * k },
+        { x: cx, y: cy + 13 * k },
+      ];
+      g.fillStyle(OUTLINE);
+      g.fillPoints(pts(1.15), true);
+      g.fillStyle(0xff8fc8);
+      g.fillPoints(pts(1), true);
+      g.fillStyle(0xffc6e4);
+      g.fillTriangle(cx - 7, cy - 11, cx + 7, cy - 11, cx, cy - 4);
+      g.lineStyle(1.2, 0xd8569a);
+      g.lineBetween(cx - 13, cy - 4, cx + 13, cy - 4);
+      g.lineBetween(cx - 4, cy - 4, cx, cy + 13);
+      g.lineBetween(cx + 4, cy - 4, cx, cy + 13);
+      g.fillStyle(0xffffff);
+      g.fillCircle(cx - 5, cy - 7, 1.8);
+      break;
+    }
+    case 'painting': {
+      const bw = 48;
+      const bh = 34;
+      const x = cx - bw / 2;
+      const y = cy - bh / 2;
+      roundBox(g, x, y, bw, bh, 3, 0xd9a440, 2.5);
+      g.fillStyle(0x7fc3ff);
+      g.fillRect(x + 5, y + 5, bw - 10, bh - 10);
+      g.fillStyle(0x4f9e48);
+      g.fillTriangle(x + 5, y + bh - 5, x + 22, y + 12, x + 36, y + bh - 5);
+      g.fillStyle(0x3f8a3c);
+      g.fillTriangle(x + 20, y + bh - 5, x + 32, y + 16, x + bw - 5, y + bh - 5);
+      g.fillStyle(0xffd34d);
+      g.fillCircle(x + bw - 13, y + 11, 4);
+      break;
+    }
+    case 'statue': {
+      const bw = 36;
+      const bh = 44;
+      const x = cx - bw / 2;
+      const y = cy - bh / 2;
+      roundBox(g, x + 2, y + bh - 14, bw - 4, 14, 3, 0xb9b2a6, 2);
+      blob(g, cx, y + 9, 7, 0xe9e4da, 2);
+      roundBox(g, cx - 9, y + 16, 18, 16, 6, 0xe9e4da, 2);
+      g.fillStyle(0xd3ccbf);
+      g.fillRect(cx - 9, y + 26, 18, 4);
+      g.fillStyle(0xa79f92);
+      g.fillCircle(cx - 2.5, y + 8, 1.2);
+      g.fillCircle(cx + 2.5, y + 8, 1.2);
+      break;
+    }
   }
 }
 
@@ -377,8 +455,8 @@ export function makeTextures(scene: Phaser.Scene) {
     }
   }
 
-  for (const id of Object.keys(ITEM_BY_ID)) {
-    const def = ITEM_BY_ID[id];
+  for (const id of Object.keys(ITEM_CATALOG)) {
+    const def = ITEM_CATALOG[id];
     const w = def.kind === 'big' ? def.w + 10 : 36;
     const h = def.kind === 'big' ? def.h + 10 : 36;
     gen(`item_${id}`, w, h, (gg) => drawItem(gg, id, w, h));
@@ -448,6 +526,22 @@ export function makeTextures(scene: Phaser.Scene) {
     gg.fillStyle(OUTLINE);
     gg.fillCircle(11, 16, 2);
     gg.fillRect(10, 16, 2, 4);
+  });
+  gen('note', 26, 22, (gg) => {
+    gg.fillStyle(0x000000, 0.2);
+    gg.fillRect(5, 6, 20, 15);
+    roundBox(gg, 3, 3, 19, 15, 2, 0xfff6a8, 1.6);
+    gg.lineStyle(1.2, 0xc8b25a);
+    for (const yy of [8, 11, 14]) gg.lineBetween(6, yy, 18, yy);
+    gg.fillStyle(0xff5a5a);
+    gg.fillCircle(12.5, 4, 2);
+  });
+  gen('keypad', 20, 26, (gg) => {
+    roundBox(gg, 3, 3, 14, 20, 3, 0x3a3f52, 1.8);
+    gg.fillStyle(0x7fd3ff);
+    gg.fillRect(5, 5, 10, 4);
+    gg.fillStyle(0xc9cfdb);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) gg.fillRect(5 + c * 3.6, 11 + r * 3.6, 2.4, 2.4);
   });
   gen('check', 20, 20, (gg) => {
     blob(gg, 10, 10, 8, 0x4fd18b, 1.8);

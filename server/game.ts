@@ -5,30 +5,21 @@ import {
   CARRY_BIG_SPEED,
   COUNTDOWN,
   FREE_HOLD_TIME,
-  GAME_DURATION,
   GUARD_CATCH_DIST,
   GUARD_RADIUS,
   INPUT_RATE,
   INPUT_STALE_AFTER,
-  ITEM_COUNT,
+  KEYPAD_COOLDOWN,
+  KEYPAD_RANGE,
   PLAYER_RADIUS,
   SOLO_BIG_SPEED,
   SOLO_CAMERA_OFF_TIME,
   SOLO_JAIL_TIME,
 } from '../shared/constants';
-import { circleHitsAny, coneSees, dist, normalize, rectHitsAny } from '../shared/geometry';
-import {
-  CAMERA,
-  ITEMS,
-  JAIL,
-  SPAWNS,
-  STATIC_OBSTACLES,
-  VISION_BLOCKERS,
-  bigItemRect,
-  handlePos,
-  type ItemDef,
-} from '../shared/map';
-import { bigItemObstacles, findInteraction, inTruckZone, sanitizeAxis, stepPlayer } from '../shared/rules';
+import { circleHitsAny, circleRectOverlap, coneSees, dist, normalize, pointInRect, rectHitsAny, rectsOverlap, type Rect, type Vec } from '../shared/geometry';
+import { getLevel, makePuzzle, type GateDef, type Level } from '../shared/levels';
+import { JAIL, SPAWNS, bigItemRect, handlePos, type ItemDef } from '../shared/map';
+import { closedGateRects, distToSegment, dynamicObstacles, findInteraction, inTruckZone, laserOn, sanitizeAxis, stepPlayer } from '../shared/rules';
 import type {
   Carry,
   GameEvent,
@@ -66,6 +57,10 @@ interface PlayerState {
   dirY: number;
   eHeld: boolean;
   prevE: boolean;
+  /** Indices lus par ce joueur, sous la forme « porte:numéro ». */
+  clues: Set<string>;
+  /** Instant à partir duquel un nouvel essai de code est accepté. */
+  nextCodeAt: number;
 }
 
 interface ItemRuntime {
@@ -79,21 +74,45 @@ interface ItemRuntime {
   push: PushState;
 }
 
+interface GateRuntime {
+  id: string;
+  def: GateDef;
+  open: boolean;
+  /** Portes à code : la combinaison et les indices de cette partie. */
+  code?: string;
+  clues?: string[];
+}
+
 const MAX_QUEUE = 12;
 const MAX_TOKENS = 4;
+const LASER_COOLDOWN = 1.5;
 
-let sharedNav: NavGrid | null = null;
-const getNav = () => (sharedNav ??= new NavGrid(STATIC_OBSTACLES, GUARD_RADIUS));
+const navCache = new Map<string, NavGrid>();
+const getNav = (level: Level) => {
+  let nav = navCache.get(level.id);
+  if (!nav) navCache.set(level.id, (nav = new NavGrid(level.staticObstacles, GUARD_RADIUS)));
+  return nav;
+};
+
+export interface GameOptions {
+  solo?: boolean;
+  level?: string;
+  /** Générateur aléatoire des codes (remplaçable dans les tests). */
+  rand?: () => number;
+}
 
 export class Game {
   phase: GamePhase = 'countdown';
   countdown = COUNTDOWN;
-  timeLeft = GAME_DURATION;
+  timeLeft: number;
   /** Horloge interne de simulation (secondes). */
   time = 0;
+  readonly solo: boolean;
+  readonly level: Level;
   players: PlayerState[];
   items: ItemRuntime[];
-  guard: Guard;
+  guards: Guard[];
+  gates: GateRuntime[];
   cameraEnabled = true;
   cameraAlarm = 0;
   freeProgress = 0;
@@ -104,12 +123,15 @@ export class Game {
   result: GameResult | null = null;
 
   private cameraCooldown = 0;
+  private laserCooldown = 0;
   private events: GameEvent[] = [];
+  /** Ce qui bloque la vue en ce moment (murs et portes fermées). */
+  private blockers: Rect[];
 
-  readonly solo: boolean;
-
-  constructor(opts: { solo?: boolean } = {}) {
+  constructor(opts: GameOptions = {}) {
     this.solo = opts.solo === true;
+    this.level = getLevel(opts.level);
+    this.timeLeft = this.level.duration;
     this.players = ((this.solo ? [0] : [0, 1]) as Seat[]).map((seat) => ({
       seat,
       x: SPAWNS[seat].x,
@@ -129,8 +151,10 @@ export class Game {
       dirY: 0,
       eHeld: false,
       prevE: false,
+      clues: new Set(),
+      nextCodeAt: 0,
     }));
-    this.items = ITEMS.map((def) => ({
+    this.items = this.level.items.map((def) => ({
       id: def.id,
       def,
       x: def.x,
@@ -140,7 +164,27 @@ export class Game {
       carrier: null,
       push: 'wait',
     }));
-    this.guard = new Guard(getNav());
+    this.gates = this.level.gates.map((def) => {
+      const g: GateRuntime = { id: def.id, def, open: false };
+      if (def.lock.type === 'code') Object.assign(g, makePuzzle(def.lock.puzzle, def.lock.notes.length, opts.rand));
+      return g;
+    });
+    this.blockers = this.computeBlockers();
+    const nav = getNav(this.level);
+    this.guards = this.level.patrols.map((patrol) => new Guard(nav, patrol, this.level.staticObstacles, () => this.blockers));
+  }
+
+  /** Premier gardien (pratique pour les tests du niveau 1). */
+  get guard(): Guard {
+    return this.guards[0];
+  }
+
+  private computeBlockers(): Rect[] {
+    return [...this.level.visionBlockers, ...closedGateRects(this.level, this.gates)];
+  }
+
+  private dynamic(exclude?: string): Rect[] {
+    return dynamicObstacles(this.level, this.items, this.gates, exclude);
   }
 
   // ───────────── Entrées ─────────────
@@ -160,6 +204,26 @@ export class Game {
     while (p.queue.length > MAX_QUEUE) p.lastSeq = p.queue.shift()!.seq;
   }
 
+  /** Essai de code sur un digicode. Retourne vrai si la porte s'ouvre. */
+  submitCode(seat: Seat, gateId: unknown, code: unknown): boolean {
+    const p = this.players[seat];
+    const g = this.gates.find((x) => x.id === gateId);
+    if (!p || !g?.code || g.open || this.phase !== 'playing' || p.jailed) return false;
+    if (g.def.lock.type !== 'code' || dist(p, g.def.lock.keypad) > KEYPAD_RANGE + 20) return false;
+    if (typeof code !== 'string' || this.time < p.nextCodeAt) return false;
+    p.nextCodeAt = this.time + KEYPAD_COOLDOWN;
+    if (code.trim() === g.code) {
+      g.open = true;
+      this.blockers = this.computeBlockers();
+      this.events.push({ type: 'codeOk', seat, gate: g.id });
+      return true;
+    }
+    // Mauvais code : le digicode bipe et le gardien le plus proche vient voir.
+    this.events.push({ type: 'codeWrong', seat, gate: g.id });
+    this.alertNearestGuard(g.def.lock.keypad);
+    return false;
+  }
+
   private fresh(p: PlayerState) {
     return this.time - p.lastInputAt <= INPUT_STALE_AFTER;
   }
@@ -172,7 +236,7 @@ export class Game {
     p.dirY = dir.y;
 
     if (p.carry?.kind !== 'big') {
-      const next = stepPlayer(p, cmd.x, cmd.y, p.carry?.kind === 'small', bigItemObstacles(this.items));
+      const next = stepPlayer(this.level, p, cmd.x, cmd.y, p.carry?.kind === 'small', this.dynamic());
       p.x = next.x;
       p.y = next.y;
       if (dir.x || dir.y) p.angle = Math.atan2(dir.y, dir.x);
@@ -191,7 +255,7 @@ export class Game {
   }
 
   private pressE(p: PlayerState) {
-    const inter = findInteraction(this.players, this.items, p.seat);
+    const inter = findInteraction(this.level, this.players, this.items, this.gates, p.seat);
     if (!inter) return;
     if (inter.type === 'pick') {
       const it = this.item(inter.item);
@@ -203,7 +267,7 @@ export class Game {
     } else if (inter.type === 'grab') {
       const it = this.item(inter.item);
       const pos = handlePos(it.x, it.y, it.def, inter.handle);
-      const obstacles = [...STATIC_OBSTACLES, ...bigItemObstacles(this.items, it.id)];
+      const obstacles = [...this.level.staticObstacles, ...this.dynamic(it.id)];
       if (circleHitsAny(pos.x, pos.y, PLAYER_RADIUS, obstacles)) {
         this.events.push({ type: 'denied', seat: p.seat, reason: 'Pas la place de ce côté !' });
         return;
@@ -216,6 +280,9 @@ export class Game {
       if (this.solo || (it.holders[0] !== null && it.holders[1] !== null)) it.state = 'carried';
       it.push = 'wait';
       this.events.push({ type: 'grab', seat: p.seat, item: it.id });
+    } else if (inter.type === 'note') {
+      p.clues.add(`${inter.gate}:${inter.index}`);
+      this.events.push({ type: 'note', seat: p.seat, gate: inter.gate, index: inter.index });
     } else if (inter.type === 'switch' && this.solo) {
       this.cameraOffUntil = this.time + SOLO_CAMERA_OFF_TIME;
     } else if (inter.type === 'leave') {
@@ -223,6 +290,7 @@ export class Game {
       this.events.push({ type: 'leave', seat: p.seat });
     }
     // 'free' et 'switch' (à deux) sont des actions maintenues, traitées à chaque tick.
+    // 'keypad' ouvre le digicode côté client, qui envoie ensuite le code.
   }
 
   private dropAction(p: PlayerState) {
@@ -303,9 +371,12 @@ export class Game {
     }
 
     this.updateBigItems(dt);
+    this.updateGates();
     this.updateHoldActions(dt);
     this.updateCamera(dt);
-    this.guard.update(dt, this.players, bigItemObstacles(this.items), this.events);
+    this.updateLasers(dt);
+    const dynamic = this.dynamic();
+    for (const g of this.guards) g.update(dt, this.players, dynamic, this.events);
     this.checkCapture();
     this.checkEnd();
   }
@@ -346,7 +417,7 @@ export class Game {
   /** Déplace l'ensemble objet + porteurs, uniquement si rien ne touche un obstacle. */
   private tryMoveBig(it: ItemRuntime, dx: number, dy: number): boolean {
     if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return false;
-    const obstacles = [...STATIC_OBSTACLES, ...bigItemObstacles(this.items, it.id)];
+    const obstacles = [...this.level.staticObstacles, ...this.dynamic(it.id)];
     for (const f of [1, 0.5, 0.25]) {
       const nx = it.x + dx * f;
       const ny = it.y + dy * f;
@@ -361,13 +432,34 @@ export class Game {
     return false;
   }
 
+  /** Grilles à plaque : ouvertes tant que la plaque est enfoncée (et jamais refermées sur quelqu'un). */
+  private updateGates() {
+    let changed = false;
+    for (const g of this.gates) {
+      if (g.def.lock.type !== 'plate') continue;
+      const plate = g.def.lock.plate;
+      const bigs = this.items.filter((it) => it.def.kind === 'big' && it.state !== 'delivered');
+      const pressed =
+        this.players.some((p) => !p.jailed && pointInRect(p.x, p.y, plate)) || bigs.some((it) => pointInRect(it.x, it.y, plate));
+      const blocked =
+        this.players.some((p) => circleRectOverlap(p.x, p.y, PLAYER_RADIUS, g.def.rect)) ||
+        bigs.some((it) => rectsOverlap(bigItemRect(it.x, it.y, it.def), g.def.rect));
+      const open = pressed || (g.open && blocked);
+      if (open !== g.open) {
+        g.open = open;
+        changed = true;
+      }
+    }
+    if (changed) this.blockers = this.computeBlockers();
+  }
+
   private updateHoldActions(dt: number) {
     let switchHeld = false;
     let freeing = false;
     for (const p of this.players) {
       p.hold = null;
       if (!p.eHeld || !this.fresh(p)) continue;
-      const inter = findInteraction(this.players, this.items, p.seat);
+      const inter = findInteraction(this.level, this.players, this.items, this.gates, p.seat);
       if (inter?.type === 'switch') {
         switchHeld = true;
         p.hold = 'switch';
@@ -412,29 +504,60 @@ export class Game {
     this.events.push({ type: 'freed', seat: p.seat });
   }
 
+  /** Envoie le gardien le plus proche voir ce qui se passe. */
+  private alertNearestGuard(at: Vec) {
+    const free = this.guards.filter((g) => g.state !== 'chase' && g.state !== 'stunned');
+    if (!free.length) return;
+    free.reduce((a, b) => (dist(a, at) <= dist(b, at) ? a : b)).investigate(at);
+  }
+
   private updateCamera(dt: number) {
     this.cameraAlarm = Math.max(0, this.cameraAlarm - dt);
     this.cameraCooldown -= dt;
     if (!this.cameraEnabled) return;
-    for (const p of this.players) {
-      if (p.jailed) continue;
-      if (!coneSees(CAMERA, CAMERA.angle, CAMERA_RANGE, CAMERA_HALF_ANGLE, p, VISION_BLOCKERS)) continue;
-      if (this.cameraAlarm <= 0) this.events.push({ type: 'cameraAlert', x: p.x, y: p.y });
-      this.cameraAlarm = 1.2;
-      if (this.cameraCooldown <= 0) {
-        this.guard.investigate(p);
-        this.cameraCooldown = 0.5;
+    for (const cam of this.level.cameras) {
+      for (const p of this.players) {
+        if (p.jailed) continue;
+        if (!coneSees(cam, cam.angle, CAMERA_RANGE, CAMERA_HALF_ANGLE, p, this.blockers)) continue;
+        if (this.cameraAlarm <= 0) this.events.push({ type: 'cameraAlert', x: p.x, y: p.y });
+        this.cameraAlarm = 1.2;
+        if (this.cameraCooldown <= 0) {
+          this.alertNearestGuard(p);
+          this.cameraCooldown = 0.5;
+        }
       }
     }
   }
 
+  /** Les lasers sont coupés en même temps que les caméras. */
+  private lasersActive(): boolean[] {
+    return this.level.lasers.map((l) => this.cameraEnabled && laserOn(l, this.time));
+  }
+
+  private updateLasers(dt: number) {
+    this.laserCooldown -= dt;
+    const active = this.lasersActive();
+    this.level.lasers.forEach((l, i) => {
+      if (!active[i]) return;
+      for (const p of this.players) {
+        if (p.jailed || distToSegment(p, l.a, l.b) > PLAYER_RADIUS) continue;
+        if (this.laserCooldown > 0) continue;
+        this.laserCooldown = LASER_COOLDOWN;
+        this.events.push({ type: 'laser', x: p.x, y: p.y });
+        this.alertNearestGuard(p);
+      }
+    });
+  }
+
   private checkCapture() {
-    if (this.guard.state === 'stunned') return;
-    for (const p of this.players) {
-      if (p.jailed || dist(this.guard, p) >= GUARD_CATCH_DIST) continue;
-      this.capture(p);
-      this.guard.stun();
-      return;
+    for (const g of this.guards) {
+      if (g.state === 'stunned') continue;
+      for (const p of this.players) {
+        if (p.jailed || dist(g, p) >= GUARD_CATCH_DIST) continue;
+        this.capture(p);
+        g.stun();
+        break;
+      }
     }
   }
 
@@ -474,7 +597,7 @@ export class Game {
 
   private end(outcome: Outcome, detail?: string) {
     this.phase = 'ended';
-    this.result = { outcome, loot: this.loot, delivered: this.delivered, total: ITEM_COUNT, detail };
+    this.result = { outcome, loot: this.loot, delivered: this.delivered, total: this.items.length, detail };
   }
 
   // ───────────── Cycle de vie ─────────────
@@ -508,14 +631,16 @@ export class Game {
   }
 
   snapshot(you: Seat, events: GameEvent[]): Snapshot {
+    const me = this.players[you];
     return {
       t: Math.round(this.time * 1000),
+      level: this.level.id,
       phase: this.phase,
       solo: this.solo,
       timeLeft: Math.round(this.timeLeft * 10) / 10,
       countdown: Math.round(this.countdown * 10) / 10,
       you,
-      ack: this.players[you].lastSeq,
+      ack: me.lastSeq,
       players: this.players.map((p) => ({
         seat: p.seat,
         x: Math.round(p.x * 10) / 10,
@@ -538,7 +663,13 @@ export class Game {
           push: it.push,
         }),
       ),
-      guard: this.guard.snap(),
+      guards: this.guards.map((g) => g.snap()),
+      gates: this.gates.map((g) => ({ id: g.id, open: g.open })),
+      lasers: this.lasersActive(),
+      // Chacun ne reçoit que les indices qu'il a lus lui-même.
+      clues: this.gates.flatMap((g) =>
+        (g.clues ?? []).flatMap((text, index) => (me.clues.has(`${g.id}:${index}`) ? [{ gate: g.id, index, text }] : [])),
+      ),
       camera: { enabled: this.cameraEnabled, alarm: this.cameraAlarm > 0 },
       loot: this.loot,
       delivered: this.delivered,
@@ -548,4 +679,3 @@ export class Game {
     };
   }
 }
-

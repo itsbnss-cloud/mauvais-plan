@@ -1,14 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { CARRY_BIG_SPEED, COUNTDOWN, GAME_DURATION, INPUT_DT, PLAYER_RADIUS, SOLO_BIG_SPEED, SOLO_CAMERA_OFF_TIME, SOLO_JAIL_TIME } from '../shared/constants';
+import { CARRY_BIG_SPEED, COUNTDOWN, INPUT_DT, KEYPAD_COOLDOWN, PLAYER_RADIUS, SOLO_BIG_SPEED, SOLO_CAMERA_OFF_TIME, SOLO_JAIL_TIME } from '../shared/constants';
 import { circleHitsAny, rectHitsAny } from '../shared/geometry';
-import { CAMERA, GUARD_PATROL, ITEMS, JAIL, STATIC_OBSTACLES, SWITCH_POS, TRUCK_ZONE, bigItemRect, handlePos } from '../shared/map';
+import { LEVELS, LEVEL_BY_ID, makePuzzle, type Level } from '../shared/levels';
+import { JAIL, SWITCH_POS, TRUCK_ZONE, bigItemRect, handlePos } from '../shared/map';
+import { inTruckZone } from '../shared/rules';
 import type { InputCmd, Seat } from '../shared/types';
 import { Game } from './game';
 import { NavGrid } from './nav';
 
 type Cmd = Partial<Omit<InputCmd, 'seq'>>;
 
-function setup(opts: { solo?: boolean } = {}) {
+const DUPONT = LEVEL_BY_ID.dupont;
+const CAMERA = DUPONT.cameras[0];
+const STATIC_OBSTACLES = DUPONT.staticObstacles;
+
+function setup(opts: { solo?: boolean; level?: string; rand?: () => number } = {}) {
   const g = new Game(opts);
   g.tick(COUNTDOWN + 0.01);
   expect(g.phase).toBe('playing');
@@ -34,13 +40,21 @@ function parkGuard(g: Game) {
   (g.guard as unknown as { timer: number }).timer = 1e9;
 }
 
+function parkGuards(g: Game) {
+  g.guards.forEach((gd, i) => {
+    gd.x = 1230;
+    gd.y = 60 + i * 40;
+    gd.stun();
+    (gd as unknown as { timer: number }).timer = 1e9;
+  });
+}
+
 function place(g: Game, seat: Seat, x: number, y: number) {
   g.players[seat].x = x;
   g.players[seat].y = y;
 }
 
 const item = (g: Game, id: string) => g.items.find((i) => i.id === id)!;
-const def = (id: string) => ITEMS.find((i) => i.id === id)!;
 
 describe('déplacements et collisions', () => {
   it('les murs bloquent les joueurs', () => {
@@ -431,7 +445,7 @@ describe('fin de partie', () => {
 
   it('une nouvelle partie repart de zéro', () => {
     const g = new Game();
-    expect(g.timeLeft).toBe(GAME_DURATION);
+    expect(g.timeLeft).toBe(DUPONT.duration);
     expect(g.loot).toBe(0);
     expect(g.items.every((i) => i.state === 'idle')).toBe(true);
     expect(g.players.every((p) => !p.jailed && !p.carry)).toBe(true);
@@ -450,30 +464,84 @@ describe('fin de partie', () => {
   });
 });
 
-describe('carte', () => {
-  it('le gardien peut rejoindre chaque point de ronde', () => {
-    const nav = new NavGrid(STATIC_OBSTACLES, 14);
-    for (let i = 0; i < GUARD_PATROL.length; i++) {
-      const a = GUARD_PATROL[i];
-      const b = GUARD_PATROL[(i + 1) % GUARD_PATROL.length];
-      expect(nav.findPath(a, b).length, `segment ${i}`).toBeGreaterThan(0);
+/**
+ * Un gros objet peut-il aller jusqu'au camion ? Recherche en largeur sur une grille fine,
+ * avec les mêmes règles de collision que le jeu (toutes les portes ouvertes).
+ * duo : les deux poignées doivent passer ; solo : une seule (la meilleure des deux).
+ */
+function bigItemCanReachTruck(level: Level, id: string, handles: (0 | 1)[]): boolean {
+  const d = level.itemById[id];
+  const obstacles = level.staticObstacles;
+  const ok = (x: number, y: number) =>
+    !rectHitsAny(bigItemRect(x, y, d), obstacles) &&
+    handles.every((h) => {
+      const p = handlePos(x, y, d, h);
+      return !circleHitsAny(p.x, p.y, PLAYER_RADIUS, obstacles);
+    });
+  const STEP = 4;
+  const seen = new Set<string>();
+  const queue: [number, number][] = [[d.x, d.y]];
+  seen.add(`${d.x},${d.y}`);
+  while (queue.length) {
+    const [x, y] = queue.shift()!;
+    if (inTruckZone({ x, y })) return true;
+    for (const [dx, dy] of [[STEP, 0], [-STEP, 0], [0, STEP], [0, -STEP]]) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const key = `${nx},${ny}`;
+      if (seen.has(key) || !ok(nx, ny)) continue;
+      seen.add(key);
+      queue.push([nx, ny]);
     }
+  }
+  return false;
+}
+
+describe.each(LEVELS.map((l) => [l.name, l] as const))('carte : %s', (_, level) => {
+  const closed = level.gates.map((g) => g.rect);
+
+  it('chaque gardien peut faire sa ronde, portes verrouillées fermées', () => {
+    const nav = new NavGrid(level.staticObstacles, 14);
+    level.patrols.forEach((patrol, gi) => {
+      for (let i = 0; i < patrol.length; i++) {
+        const a = patrol[i];
+        const b = patrol[(i + 1) % patrol.length];
+        expect(nav.findPath(a, b, closed).length, `gardien ${gi}, segment ${i}`).toBeGreaterThan(0);
+      }
+    });
   });
 
-  it('chaque petit objet est accessible depuis le camion', () => {
-    const nav = new NavGrid(STATIC_OBSTACLES, PLAYER_RADIUS);
-    for (const it of ITEMS.filter((i) => i.kind === 'small')) {
-      expect(nav.findPath({ x: 268, y: 620 }, { x: it.x, y: it.y }).length, it.id).toBeGreaterThan(0);
+  it('objets, papiers et digicodes sont accessibles (une fois les portes ouvertes)', () => {
+    const nav = new NavGrid(level.staticObstacles, PLAYER_RADIUS);
+    const from = { x: 268, y: 620 };
+    for (const it of level.items.filter((i) => i.kind === 'small')) {
+      expect(nav.findPath(from, it).length, it.id).toBeGreaterThan(0);
+    }
+    for (const g of level.gates) {
+      if (g.lock.type === 'plate') {
+        const p = g.lock.plate;
+        expect(nav.findPath(from, { x: p.x + p.w / 2, y: p.y + p.h / 2 }, closed).length, `plaque ${g.id}`).toBeGreaterThan(0);
+        continue;
+      }
+      // Le digicode doit être atteignable sans ouvrir sa propre porte.
+      expect(nav.findPath(from, g.lock.keypad, closed.filter((r) => r !== g.rect)).length, `digicode ${g.id}`).toBeGreaterThan(0);
+      g.lock.notes.forEach((n, i) => expect(nav.findPath(from, n).length, `papier ${g.id}/${i}`).toBeGreaterThan(0));
     }
   });
 
   it('les points de prise des gros objets sont libres', () => {
-    for (const id of ['clock', 'safe']) {
-      const d = def(id);
+    for (const d of level.items.filter((i) => i.kind === 'big')) {
       for (const h of [0, 1] as const) {
         const p = handlePos(d.x, d.y, d, h);
-        expect(circleHitsAny(p.x, p.y, PLAYER_RADIUS, STATIC_OBSTACLES), `${id}/${h}`).toBe(false);
+        expect(circleHitsAny(p.x, p.y, PLAYER_RADIUS, level.staticObstacles), `${d.id}/${h}`).toBe(false);
       }
+    }
+  });
+
+  it('chaque gros objet peut aller jusqu’au camion, à deux comme en solo', () => {
+    for (const d of level.items.filter((i) => i.kind === 'big')) {
+      expect(bigItemCanReachTruck(level, d.id, [0, 1]), `${d.id} à deux`).toBe(true);
+      expect(bigItemCanReachTruck(level, d.id, [0]) || bigItemCanReachTruck(level, d.id, [1]), `${d.id} en solo`).toBe(true);
     }
   });
 });
@@ -552,5 +620,167 @@ describe('mode solo', () => {
     step(ctx, [{ e: true }]);
     expect(g.phase).toBe('ended');
     expect(g.result?.outcome).toBe('escaped_empty');
+  });
+});
+
+describe('porte à code et indices (villa)', () => {
+  const villa = LEVEL_BY_ID.villa;
+  const gate = villa.gates[0];
+  if (gate.lock.type !== 'code') throw new Error('porte à code attendue');
+  const lock = gate.lock;
+
+  it('bloque le passage tant que le code n’est pas trouvé', () => {
+    const ctx = setup({ level: 'villa' });
+    parkGuards(ctx.g);
+    place(ctx.g, 0, 850, 590);
+    step(ctx, [{ x: 1 }], 60);
+    expect(ctx.g.players[0].x).toBeLessThanOrEqual(gate.rect.x - PLAYER_RADIUS + 0.01);
+  });
+
+  it('chacun ne voit que les indices qu’il a lus lui-même', () => {
+    const ctx = setup({ level: 'villa' });
+    parkGuards(ctx.g);
+    place(ctx.g, 0, lock.notes[0].x, lock.notes[0].y + 10);
+    step(ctx, [{ e: true }]);
+    const mine = ctx.g.snapshot(0, []).clues;
+    expect(mine).toHaveLength(1);
+    expect(mine[0].text).toContain(ctx.g.gates[0].code![0]);
+    expect(ctx.g.snapshot(1, []).clues).toHaveLength(0);
+  });
+
+  it('un mauvais code alerte le gardien, le bon ouvre la porte (avec un délai entre deux essais)', () => {
+    const ctx = setup({ level: 'villa' });
+    const { g } = ctx;
+    const code = g.gates[0].code!;
+    const wrong = code === '000' ? '111' : '000';
+    place(g, 0, lock.keypad.x - 8, lock.keypad.y + 12);
+    g.drainEvents();
+    expect(g.submitCode(0, 'bureau', wrong)).toBe(false);
+    expect(g.drainEvents().some((e) => e.type === 'codeWrong')).toBe(true);
+    expect(g.guard.state).toBe('investigate');
+
+    // Trop tôt : refusé même avec le bon code.
+    expect(g.submitCode(0, 'bureau', code)).toBe(false);
+    parkGuards(g);
+    step(ctx, [], Math.ceil(KEYPAD_COOLDOWN / INPUT_DT) + 1);
+    // Trop loin du digicode : refusé.
+    place(g, 1, 400, 600);
+    expect(g.submitCode(1, 'bureau', code)).toBe(false);
+    expect(g.submitCode(0, 'bureau', code)).toBe(true);
+    expect(g.gates[0].open).toBe(true);
+
+    place(g, 0, 850, 590);
+    step(ctx, [{ x: 1 }], 30);
+    expect(g.players[0].x).toBeGreaterThan(gate.rect.x + gate.rect.w);
+  });
+});
+
+describe('grille à plaque de pression (musée)', () => {
+  const musee = LEVEL_BY_ID.musee;
+  const gate = musee.gates.find((x) => x.id === 'bijoux')!;
+  if (gate.lock.type !== 'plate') throw new Error('plaque attendue');
+  const plate = gate.lock.plate;
+  const center = { x: plate.x + plate.w / 2, y: plate.y + plate.h / 2 };
+  const isOpen = (g: Game) => g.gates.find((x) => x.id === 'bijoux')!.open;
+
+  it('ouverte tant que quelqu’un est sur la plaque', () => {
+    const ctx = setup({ level: 'musee' });
+    parkGuards(ctx.g);
+    expect(isOpen(ctx.g)).toBe(false);
+    place(ctx.g, 0, center.x, center.y);
+    step(ctx);
+    expect(isOpen(ctx.g)).toBe(true);
+    place(ctx.g, 0, center.x, center.y - 120);
+    step(ctx);
+    expect(isOpen(ctx.g)).toBe(false);
+  });
+
+  it('ne se referme pas sur un joueur dans l’embrasure', () => {
+    const ctx = setup({ level: 'musee' });
+    parkGuards(ctx.g);
+    place(ctx.g, 0, center.x, center.y);
+    step(ctx);
+    place(ctx.g, 1, gate.rect.x + gate.rect.w / 2, gate.rect.y + gate.rect.h / 2);
+    place(ctx.g, 0, center.x, center.y - 120);
+    step(ctx);
+    expect(isOpen(ctx.g)).toBe(true);
+    place(ctx.g, 1, 1100, 160);
+    step(ctx);
+    expect(isOpen(ctx.g)).toBe(false);
+  });
+
+  it('un objet lourd posé sur la plaque la maintient (astuce du solo)', () => {
+    const ctx = setup({ level: 'musee', solo: true });
+    parkGuards(ctx.g);
+    const statue = item(ctx.g, 'statue');
+    statue.x = center.x;
+    statue.y = center.y;
+    step(ctx);
+    expect(isOpen(ctx.g)).toBe(true);
+  });
+});
+
+describe('lasers (musée)', () => {
+  const laser = LEVEL_BY_ID.musee.lasers[0];
+
+  /** Avance jusqu'à ce que le premier laser soit allumé. */
+  function untilOn(ctx: ReturnType<typeof setup>) {
+    for (let i = 0; i < 200 && !ctx.g.snapshot(0, []).lasers[0]; i++) step(ctx);
+    expect(ctx.g.snapshot(0, []).lasers[0]).toBe(true);
+  }
+
+  it('toucher un laser allumé déclenche l’alarme et attire un gardien', () => {
+    const ctx = setup({ level: 'musee' });
+    const { g } = ctx;
+    place(g, 1, 300, 600);
+    untilOn(ctx);
+    g.drainEvents();
+    place(g, 0, laser.a.x, 260);
+    step(ctx);
+    expect(g.drainEvents().some((e) => e.type === 'laser')).toBe(true);
+    expect(g.guards.some((gd) => gd.state === 'investigate')).toBe(true);
+  });
+
+  it('le boîtier électrique coupe aussi les lasers', () => {
+    const ctx = setup({ level: 'musee' });
+    const { g } = ctx;
+    parkGuards(g);
+    place(g, 1, SWITCH_POS.x - 10, SWITCH_POS.y);
+    untilOn(ctx);
+    g.drainEvents();
+    place(g, 0, laser.a.x, 260);
+    step(ctx, [{}, { e: true }], 10);
+    expect(g.snapshot(0, []).lasers.every((on) => !on)).toBe(true);
+    expect(g.drainEvents().some((e) => e.type === 'laser')).toBe(false);
+  });
+});
+
+describe('niveaux', () => {
+  it('le musée a deux gardiens qui patrouillent', () => {
+    const ctx = setup({ level: 'musee' });
+    expect(ctx.g.snapshot(0, []).guards).toHaveLength(2);
+    expect(ctx.g.result).toBeNull();
+    const starts = ctx.g.guards.map((gd) => ({ x: gd.x, y: gd.y }));
+    step(ctx, [], 60);
+    ctx.g.guards.forEach((gd, i) => expect(Math.hypot(gd.x - starts[i].x, gd.y - starts[i].y)).toBeGreaterThan(20));
+  });
+
+  it('un niveau inconnu retombe sur le premier', () => {
+    expect(new Game({ level: 'nimporte' }).level.id).toBe('dupont');
+  });
+
+  it('les énigmes du musée donnent un code cohérent', () => {
+    let seed = 1;
+    const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    for (let i = 0; i < 200; i++) {
+      const { code, clues } = makePuzzle('riddle', 4, rand);
+      const [d1, d2, d3, d4] = [...code].map(Number);
+      expect(code).toMatch(/^[0-9]{4}$/);
+      expect(clues).toHaveLength(4);
+      expect(clues[0]).toContain(String(d1));
+      expect(d3).toBe(d2 - d1);
+      expect(d4).toBe(d1 * 2);
+      expect(clues[1]).toContain(String(d2 - d1));
+    }
   });
 });

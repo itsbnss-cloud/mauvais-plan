@@ -10,7 +10,6 @@ import {
   GUARD_VIEW_RANGE,
 } from '../shared/constants';
 import { angleDiff, coneSees, dist, lineOfSight, moveCircle, type Rect, type Vec } from '../shared/geometry';
-import { GUARD_PATROL, STATIC_OBSTACLES, VISION_BLOCKERS } from '../shared/map';
 import type { GameEvent, GuardSnap, GuardState, Seat } from '../shared/types';
 import type { NavGrid } from './nav';
 
@@ -24,8 +23,8 @@ export interface GuardTarget {
 const TURN_RATE = 7;
 
 export class Guard {
-  x = GUARD_PATROL[0].x;
-  y = GUARD_PATROL[0].y;
+  x: number;
+  y: number;
   angle = 0;
   state: GuardState = 'patrol';
   suspicion = 0;
@@ -43,7 +42,17 @@ export class Guard {
   private stuckTime = 0;
   private stuckFails = 0;
 
-  constructor(private readonly nav: NavGrid) {}
+  constructor(
+    private readonly nav: NavGrid,
+    private readonly patrol: readonly Vec[],
+    private readonly staticObstacles: readonly Rect[],
+    /** Ce qui bloque la vue à cet instant (murs et portes fermées). */
+    private readonly blockers: () => readonly Rect[],
+  ) {
+    this.x = patrol[0].x;
+    this.y = patrol[0].y;
+    this.wp = 1 % patrol.length;
+  }
 
   snap(): GuardSnap {
     return {
@@ -58,9 +67,10 @@ export class Guard {
   }
 
   sees(p: Vec): boolean {
-    if (coneSees(this, this.angle, GUARD_VIEW_RANGE, GUARD_VIEW_HALF_ANGLE, p, VISION_BLOCKERS)) return true;
+    const blockers = this.blockers();
+    if (coneSees(this, this.angle, GUARD_VIEW_RANGE, GUARD_VIEW_HALF_ANGLE, p, blockers)) return true;
     // On sent un cambrioleur collé dans le dos.
-    return dist(this, p) < 36 && lineOfSight(this, p, VISION_BLOCKERS);
+    return dist(this, p) < 36 && lineOfSight(this, p, blockers);
   }
 
   /** Alerte de la caméra : aller voir la dernière position connue. */
@@ -86,7 +96,7 @@ export class Guard {
     this.lastSeen = null;
     let best = 0;
     let bestD = Infinity;
-    GUARD_PATROL.forEach((w, i) => {
+    this.patrol.forEach((w, i) => {
       const d = dist(this, w);
       if (d < bestD) {
         bestD = d;
@@ -160,7 +170,7 @@ export class Guard {
 
     if (this.state === 'patrol') {
       if (this.needPath) {
-        this.path = this.nav.findPath(this, GUARD_PATROL[this.wp], dynamic);
+        this.path = this.nav.findPath(this, this.patrol[this.wp], dynamic);
         this.needPath = false;
         if (!this.path.length) this.advanceWaypoint();
       }
@@ -179,7 +189,7 @@ export class Guard {
   }
 
   private advanceWaypoint() {
-    this.wp = (this.wp + 1) % GUARD_PATROL.length;
+    this.wp = (this.wp + 1) % this.patrol.length;
     this.needPath = true;
   }
 
@@ -207,7 +217,7 @@ export class Guard {
   /** Avance le long du chemin. Retourne vrai une fois arrivé. */
   private follow(speed: number, dt: number, dynamic: readonly Rect[]): boolean {
     if (!this.path.length) return true;
-    const obstacles = [...STATIC_OBSTACLES, ...dynamic];
+    const obstacles = [...this.staticObstacles, ...dynamic];
     const start = { x: this.x, y: this.y };
     let budget = speed * dt;
     let moveAngle: number | null = null;

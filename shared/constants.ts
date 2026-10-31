@@ -38,8 +38,13 @@ export const GRAB_RANGE = 34;
 export const SWITCH_RANGE = 42;
 export const LOCK_RANGE = 46;
 export const FREE_HOLD_TIME = 2;
+export const KEYPAD_RANGE = 44;
+export const NOTE_RANGE = 40;
+/** Délai minimal entre deux essais de code (anti-force brute). */
+export const KEYPAD_COOLDOWN = 1.5;
+export const MAX_GUARDS = 2;
+export const MAX_CAMERAS = 2;
 
-export const GAME_DURATION = 300;
 export const COUNTDOWN = 3;
 export const RECONNECT_GRACE_MS = 60_000;
 
@@ -49,6 +54,5 @@ export const SOLO_JAIL_TIME = 10;
 export const SOLO_CAMERA_OFF_TIME = 8;
 
 export const MAX_NAME_LENGTH = 16;
-export const ITEM_COUNT = 6;
 
 export const PLAYER_COLORS = ['violet', 'orange'] as const;

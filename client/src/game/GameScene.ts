@@ -1,9 +1,22 @@
 import Phaser from 'phaser';
-import { CAMERA_HALF_ANGLE, CAMERA_RANGE, GUARD_VIEW_HALF_ANGLE, GUARD_VIEW_RANGE, INPUT_DT, SOLO_CAMERA_OFF_TIME, SOLO_JAIL_TIME, WORLD_H, WORLD_W } from '../../../shared/constants';
-import { angleDiff, raycast, type Vec } from '../../../shared/geometry';
-import { CAMERA, ITEM_BY_ID, JAIL, ROOMS, SWITCH_POS, TRUCK_RECT, TRUCK_ZONE, VISION_BLOCKERS } from '../../../shared/map';
-import { bigItemObstacles, findInteraction, stepPlayer } from '../../../shared/rules';
-import type { GameEvent, InputCmd, ItemSnap, PlayerSnap, Seat, Snapshot } from '../../../shared/types';
+import {
+  CAMERA_HALF_ANGLE,
+  CAMERA_RANGE,
+  GUARD_VIEW_HALF_ANGLE,
+  GUARD_VIEW_RANGE,
+  INPUT_DT,
+  MAX_CAMERAS,
+  MAX_GUARDS,
+  SOLO_CAMERA_OFF_TIME,
+  SOLO_JAIL_TIME,
+  WORLD_H,
+  WORLD_W,
+} from '../../../shared/constants';
+import { angleDiff, pointInRect, raycast, type Rect, type Vec } from '../../../shared/geometry';
+import { DEFAULT_LEVEL, getLevel, type Level } from '../../../shared/levels';
+import { ITEM_CATALOG, JAIL, SWITCH_POS, TRUCK_RECT, TRUCK_ZONE } from '../../../shared/map';
+import { closedGateRects, dynamicObstacles, findInteraction, stepPlayer } from '../../../shared/rules';
+import type { GameEvent, GuardSnap, InputCmd, ItemSnap, PlayerSnap, Seat, Snapshot } from '../../../shared/types';
 import { sfx } from '../sfx';
 import { CHAR_H, PALETTES, charKey, makeTextures, type Facing } from './art';
 import { KeyboardInput } from './input';
@@ -14,6 +27,14 @@ export interface SceneBridge {
   names(): [string, string];
   onSnapshot(s: Snapshot): void;
   toast(msg: string, tone?: 'info' | 'good' | 'bad'): void;
+  /** E devant un digicode : ouvrir le pavé numérique. */
+  openKeypad(gate: string): void;
+}
+
+interface CamView {
+  sprite: Phaser.GameObjects.Image;
+  led: Phaser.GameObjects.Image;
+  off: Phaser.GameObjects.Text;
 }
 
 const INTERP_DELAY = 110;
@@ -67,16 +88,22 @@ export class GameScene extends Phaser.Scene {
   private myMoving = false;
 
   private players: CharView[] = [];
-  private guard!: CharView;
-  private guardBubble!: Phaser.GameObjects.Text;
+  private guards: CharView[] = [];
+  private guardBubbles: Phaser.GameObjects.Text[] = [];
+  private level: Level = getLevel(DEFAULT_LEVEL);
+  private worldImage!: Phaser.GameObjects.Image;
+  /** Objets propres au niveau affiché (étiquettes, digicodes, papiers). */
+  private levelObjects: Phaser.GameObjects.GameObject[] = [];
+  private floorFx!: Phaser.GameObjects.Graphics;
+  private wallFx!: Phaser.GameObjects.Graphics;
+  private prevE = false;
+  private coneBlockers: Rect[] = [];
   private items = new Map<string, ItemView>();
   private truckLoot = new Map<string, Phaser.GameObjects.Image>();
   private truck!: Phaser.GameObjects.Image;
   private cones!: Phaser.GameObjects.Graphics;
   private overlay!: Phaser.GameObjects.Graphics;
-  private camSprite!: Phaser.GameObjects.Image;
-  private camLed!: Phaser.GameObjects.Image;
-  private camOff!: Phaser.GameObjects.Text;
+  private cams: CamView[] = [];
   private switchSprite!: Phaser.GameObjects.Image;
   private lock!: Phaser.GameObjects.Image;
   private hintBg!: Phaser.GameObjects.Graphics;
@@ -96,18 +123,7 @@ export class GameScene extends Phaser.Scene {
 
   create() {
     makeTextures(this);
-    makeWorldTexture(this);
-    this.add.image(0, 0, 'world').setOrigin(0).setDepth(-1000);
-
-    for (const room of ROOMS) {
-      // Le bureau a sa bibliothèque en bas à gauche : étiquette en haut.
-      const top = room.name === 'Bureau';
-      this.add
-        .text(room.rect.x + 14, top ? room.rect.y + 14 : room.rect.y + room.rect.h - 14, room.name.toUpperCase(), { fontFamily: FONT, fontSize: '13px', color: '#2a1f3d', fontStyle: '600' })
-        .setOrigin(0, top ? 0 : 1)
-        .setAlpha(0.35)
-        .setDepth(-900);
-    }
+    this.worldImage = this.add.image(0, 0, makeWorldTexture(this, this.level)).setOrigin(0).setDepth(-1000);
     this.add
       .text(JAIL.outer.x + JAIL.outer.w / 2, JAIL.outer.y - 2, 'CABANON', { fontFamily: FONT, fontSize: '12px', color: '#ffffff', fontStyle: '600', stroke: '#2a1f3d', strokeThickness: 3 })
       .setOrigin(0.5, 0)
@@ -118,31 +134,42 @@ export class GameScene extends Phaser.Scene {
       .setDepth(-800);
 
     this.cones = this.add.graphics().setDepth(-500);
+    this.floorFx = this.add.graphics().setDepth(-450);
+    this.wallFx = this.add.graphics().setDepth(2950);
     this.truck = this.add.image(TRUCK_RECT.x - 2, TRUCK_RECT.y - 2, 'truck').setOrigin(0).setDepth(TRUCK_RECT.y + TRUCK_RECT.h / 2);
 
-    for (const id of Object.keys(ITEM_BY_ID)) {
-      const def = ITEM_BY_ID[id];
-      const glow = this.add.image(def.x, def.y, 'glow').setDepth(-600).setScale(def.kind === 'big' ? 1.6 : 1);
-      const sprite = this.add.image(def.x, def.y, `item_${id}`);
-      const spark = this.add.image(def.x + 10, def.y - 12, 'spark').setDepth(5000).setTint(0xfff3a0);
+    for (const id of Object.keys(ITEM_CATALOG)) {
+      const def = ITEM_CATALOG[id];
+      const glow = this.add.image(0, 0, 'glow').setDepth(-600).setScale(def.kind === 'big' ? 1.6 : 1).setVisible(false);
+      const sprite = this.add.image(0, 0, `item_${id}`).setVisible(false);
+      const spark = this.add.image(0, 0, 'spark').setDepth(5000).setTint(0xfff3a0).setVisible(false);
       this.tweens.add({ targets: spark, scale: { from: 0.2, to: 0.9 }, alpha: { from: 1, to: 0 }, duration: 900, repeat: -1, repeatDelay: 600 + Math.random() * 1500 });
       this.items.set(id, { sprite, glow, spark });
     }
 
     this.players = [0, 1].map((seat) => this.makeChar(`p${seat}`, PALETTES[seat].css));
-    this.guard = this.makeChar('guard', '#ffffff');
-    this.guard.label.setText('Gardien').setColor('#cfe0ff');
-    this.guardBubble = this.add
-      .text(0, 0, '', { fontFamily: FONT, fontSize: '30px', fontStyle: '700', color: '#ff4d4d', stroke: '#ffffff', strokeThickness: 6 })
-      .setOrigin(0.5, 1)
-      .setDepth(9000);
+    for (let i = 0; i < MAX_GUARDS; i++) {
+      const view = this.makeChar('guard', '#ffffff');
+      view.label.setText('Gardien').setColor('#cfe0ff');
+      this.guards.push(view);
+      this.guardBubbles.push(
+        this.add
+          .text(0, 0, '', { fontFamily: FONT, fontSize: '30px', fontStyle: '700', color: '#ff4d4d', stroke: '#ffffff', strokeThickness: 6 })
+          .setOrigin(0.5, 1)
+          .setDepth(9000),
+      );
+    }
 
-    this.camSprite = this.add.image(CAMERA.x, CAMERA.y, 'cam').setRotation(CAMERA.angle).setDepth(3000);
-    this.camLed = this.add.image(CAMERA.x - 4, CAMERA.y - 4, 'led').setDepth(3001).setScale(0.7);
-    this.camOff = this.add
-      .text(CAMERA.x + 18, CAMERA.y - 18, 'OFF', { fontFamily: FONT, fontSize: '12px', fontStyle: '700', color: '#ffffff', backgroundColor: '#2a1f3d', padding: { x: 4, y: 1 } })
-      .setDepth(3002)
-      .setVisible(false);
+    for (let i = 0; i < MAX_CAMERAS; i++) {
+      this.cams.push({
+        sprite: this.add.image(0, 0, 'cam').setDepth(3000),
+        led: this.add.image(0, 0, 'led').setDepth(3001).setScale(0.7),
+        off: this.add
+          .text(0, 0, 'OFF', { fontFamily: FONT, fontSize: '12px', fontStyle: '700', color: '#ffffff', backgroundColor: '#2a1f3d', padding: { x: 4, y: 1 } })
+          .setDepth(3002)
+          .setVisible(false),
+      });
+    }
     this.switchSprite = this.add.image(SWITCH_POS.x + 8, SWITCH_POS.y, 'switch_on').setDepth(3000);
     this.lock = this.add.image(JAIL.lock.x, JAIL.lock.y - 16, 'lock').setDepth(3000);
 
@@ -163,10 +190,56 @@ export class GameScene extends Phaser.Scene {
     this.puffEmitter = burst('puff', { speed: { min: 30, max: 90 }, lifespan: 700, scale: { start: 0.8, end: 1.6 }, alpha: { start: 0.9, end: 0 } });
 
     this.ready = true;
+    this.setLevel(this.level, true);
     for (const s of this.early) this.pushSnapshot(s);
     this.early = [];
   }
 
+  /** Change le décor et les éléments propres au niveau. */
+  private setLevel(level: Level, force = false) {
+    if (!force && level.id === this.level.id) return;
+    this.level = level;
+    this.worldImage.setTexture(makeWorldTexture(this, level));
+    for (const o of this.levelObjects) o.destroy();
+    this.levelObjects = [];
+    for (const room of level.rooms) {
+      this.levelObjects.push(
+        this.add
+          .text(room.rect.x + 14, room.labelTop ? room.rect.y + 14 : room.rect.y + room.rect.h - 14, room.name.toUpperCase(), {
+            fontFamily: FONT,
+            fontSize: '13px',
+            color: room.floor === 'velvet' || room.floor === 'steel' ? '#ffffff' : '#2a1f3d',
+            fontStyle: '600',
+          })
+          .setOrigin(0, room.labelTop ? 0 : 1)
+          .setAlpha(0.4)
+          .setDepth(-900),
+      );
+    }
+    for (const g of level.gates) {
+      if (g.lock.type !== 'code') continue;
+      this.levelObjects.push(this.add.image(g.lock.keypad.x, g.lock.keypad.y, 'keypad').setDepth(3000));
+      for (const n of g.lock.notes) this.levelObjects.push(this.add.image(n.x, n.y, 'note').setDepth(-300));
+    }
+    this.cams.forEach((c, i) => {
+      const cam = level.cameras[i];
+      for (const o of [c.sprite, c.led]) o.setVisible(!!cam);
+      c.off.setVisible(false);
+      if (!cam) return;
+      c.sprite.setPosition(cam.x, cam.y).setRotation(cam.angle);
+      c.led.setPosition(cam.x - 4, cam.y - 4);
+      c.off.setPosition(cam.x + 18, cam.y - 18);
+    });
+    for (const [id, view] of this.items) {
+      const used = !!level.itemById[id];
+      for (const o of [view.sprite, view.glow, view.spark]) o.setVisible(used);
+    }
+    this.clearTruck();
+  }
+
+  private blockers(s: Snapshot): Rect[] {
+    return [...this.level.visionBlockers, ...closedGateRects(this.level, s.gates)];
+  }
   private makeChar(prefix: string, color: string): CharView {
     const shadow = this.add.image(0, 0, 'shadow');
     const body = this.add.image(0, 0, `${prefix}_down_0`).setOrigin(0.5, 0.86);
@@ -206,6 +279,7 @@ export class GameScene extends Phaser.Scene {
     if (this.offset === null || sample < this.offset) this.offset = sample;
     else this.offset += (sample - this.offset) * 0.02;
 
+    this.setLevel(getLevel(s.level));
     this.buffer.push(s);
     while (this.buffer.length > 2 && this.buffer[1].t < s.t - 1000) this.buffer.shift();
     const prevPhase = this.latest?.phase;
@@ -247,10 +321,10 @@ export class GameScene extends Phaser.Scene {
       this.corr = { x: 0, y: 0 };
       return;
     }
-    const dyn = bigItemObstacles(s.items);
+    const dyn = dynamicObstacles(this.level, s.items, s.gates);
     const small = me.carry?.kind === 'small';
     let p: Vec = { x: me.x, y: me.y };
-    for (const c of this.pending) p = stepPlayer(p, c.x, c.y, small, dyn);
+    for (const c of this.pending) p = stepPlayer(this.level, p, c.x, c.y, small, dyn);
     if (this.pred && this.prevPred) {
       const dx = p.x - this.pred.x;
       const dy = p.y - this.pred.y;
@@ -272,6 +346,15 @@ export class GameScene extends Phaser.Scene {
     const s = this.latest;
     const smp = this.input2.sample();
     if (!s || s.phase !== 'playing') return;
+    // E devant un digicode : on ouvre le pavé numérique.
+    if (smp.e && !this.prevE) {
+      const me = s.players[s.you];
+      const pos = this.myDisplayPos(s) ?? me;
+      const players = s.players.map((p, i) => (i === s.you ? { ...p, x: pos.x, y: pos.y } : p));
+      const inter = findInteraction(this.level, players, s.items, s.gates, s.you);
+      if (inter?.type === 'keypad') this.bridge.openKeypad(inter.gate);
+    }
+    this.prevE = smp.e;
     const cmd: InputCmd = { seq: ++this.seq, ...smp };
     this.bridge.send(cmd);
     this.pending.push(cmd);
@@ -281,7 +364,7 @@ export class GameScene extends Phaser.Scene {
     if (this.pred) {
       const me = s.players[s.you];
       this.prevPred = this.pred;
-      this.pred = stepPlayer(this.pred, cmd.x, cmd.y, me.carry?.kind === 'small', bigItemObstacles(s.items));
+      this.pred = stepPlayer(this.level, this.pred, cmd.x, cmd.y, me.carry?.kind === 'small', dynamicObstacles(this.level, s.items, s.gates));
     }
   }
 
@@ -302,7 +385,7 @@ export class GameScene extends Phaser.Scene {
     const [a, b, t] = this.sampleBuffer();
     this.renderItems(a, b, t, s);
     this.renderPlayers(a, b, t, s, dt);
-    this.renderGuard(a, b, t, s, dt);
+    this.renderGuards(a, b, t, s, dt);
     this.overlay.clear();
     this.renderDevices(s);
     this.renderCones(a, b, t, s);
@@ -401,14 +484,21 @@ export class GameScene extends Phaser.Scene {
     view.badge.setVisible(!!p?.leave).setPosition(x + 18, y - 40).setDepth(9001);
   }
 
-  private renderGuard(a: Snapshot, b: Snapshot, t: number, s: Snapshot, dt: number) {
-    const ga = a.guard;
-    const gb = b.guard;
+  private renderGuards(a: Snapshot, b: Snapshot, t: number, s: Snapshot, dt: number) {
+    this.guards.forEach((view, i) => {
+      const ga = a.guards[i];
+      const gb = b.guards[i];
+      const present = !!ga && !!gb && !!s.guards[i];
+      for (const o of [view.body, view.shadow, view.label, this.guardBubbles[i]]) o.setVisible(present);
+      if (present) this.renderGuard(view, this.guardBubbles[i], ga, gb, s.guards[i], t, dt);
+    });
+  }
+
+  private renderGuard(view: CharView, bubble: Phaser.GameObjects.Text, ga: GuardSnap, gb: GuardSnap, g: GuardSnap, t: number, dt: number) {
     const x = lerp(ga.x, gb.x, t);
     const y = lerp(ga.y, gb.y, t);
     const angle = ga.angle + angleDiff(gb.angle, ga.angle) * t;
-    this.drawChar(this.guard, 'guard', x, y, angle, gb.moving, null, dt, 'Gardien');
-    const g = s.guard;
+    this.drawChar(view, 'guard', x, y, angle, gb.moving, null, dt, 'Gardien');
     let txt = '';
     let color = '#ff4d4d';
     if (g.state === 'chase') txt = '!';
@@ -420,15 +510,15 @@ export class GameScene extends Phaser.Scene {
       color = g.suspicion > 0.5 ? '#ff8a3c' : '#ffd34d';
     }
     const pulse = txt === '!' ? 1 + Math.sin(this.time.now / 80) * 0.12 : 1;
-    this.guardBubble.setText(txt).setColor(color).setPosition(x, y - CHAR_H - 8).setScale(pulse);
-    this.guard.label.setVisible(!txt);
+    bubble.setText(txt).setColor(color).setPosition(x, y - CHAR_H - 8).setScale(pulse);
+    view.label.setVisible(!txt);
   }
 
   private renderItems(a: Snapshot, b: Snapshot, t: number, s: Snapshot) {
     const now = this.time.now;
     for (const it of s.items) {
       const view = this.items.get(it.id)!;
-      const def = ITEM_BY_ID[it.id];
+      const def = ITEM_CATALOG[it.id];
       const ia = a.items.find((i) => i.id === it.id) ?? it;
       const ib = b.items.find((i) => i.id === it.id) ?? it;
       const x = lerp(ia.x, ib.x, t);
@@ -438,7 +528,7 @@ export class GameScene extends Phaser.Scene {
       view.glow.setVisible(it.state === 'idle');
       view.spark.setVisible(it.state === 'idle');
       if (onMap) {
-        const bob = it.state === 'idle' && def.kind === 'small' ? Math.sin(now / 300 + def.x) * 2 : 0;
+        const bob = it.state === 'idle' && def.kind === 'small' ? Math.sin(now / 300 + it.id.length * 40) * 2 : 0;
         view.sprite.setPosition(x, y + bob).setDepth(y + (def.kind === 'big' ? def.h / 2 : 8));
         view.glow.setPosition(x, y);
         view.spark.setPosition(x + 10, y - 12);
@@ -456,6 +546,11 @@ export class GameScene extends Phaser.Scene {
       console: [130, 78, 0.8],
       necklace: [160, 76, 0.8],
       laptop: [185, 72, 0.8],
+      painting: [150, 30, 0.6],
+      statue: [92, 36, 0.65],
+      vase: [112, 56, 0.75],
+      goldbar: [142, 56, 0.8],
+      diamond: [168, 56, 0.8],
     };
     const [sx, sy, sc] = slots[it.id] ?? [140, 50, 0.7];
     const img = this.add.image(TRUCK_RECT.x + sx - 6, TRUCK_RECT.y + sy, `item_${it.id}`).setScale(0).setDepth(this.truck.depth + 1);
@@ -471,13 +566,81 @@ export class GameScene extends Phaser.Scene {
   private renderDevices(s: Snapshot) {
     const cam = s.camera;
     const blink = Math.floor(this.time.now / 400) % 2 === 0;
-    this.camLed.setTint(cam.alarm ? 0xff3b3b : 0xff6b6b).setVisible(cam.enabled && (cam.alarm || blink));
-    this.camSprite.setAlpha(cam.enabled ? 1 : 0.55);
-    this.camOff.setVisible(!cam.enabled).setText(s.cameraOff > 0 ? `OFF ${Math.ceil(s.cameraOff)} s` : 'OFF');
+    this.level.cameras.forEach((_, i) => {
+      const v = this.cams[i];
+      if (!v) return;
+      v.led.setTint(cam.alarm ? 0xff3b3b : 0xff6b6b).setVisible(cam.enabled && (cam.alarm || blink));
+      v.sprite.setAlpha(cam.enabled ? 1 : 0.55);
+      v.off.setVisible(!cam.enabled).setText(s.cameraOff > 0 ? `OFF ${Math.ceil(s.cameraOff)} s` : 'OFF');
+    });
     this.switchSprite.setTexture(cam.enabled ? 'switch_on' : 'switch_off');
     this.lock.setVisible(s.players.some((p) => p.jailed));
     // Progression de libération autour du cadenas, visible des deux côtés.
     if (s.freeProgress > 0) this.drawProgress(JAIL.lock.x, JAIL.lock.y - 16, s.freeProgress);
+    this.renderPuzzles(s);
+  }
+
+  /** Portes verrouillées, plaques de pression et lasers. */
+  private renderPuzzles(s: Snapshot) {
+    const f = this.floorFx;
+    const w = this.wallFx;
+    f.clear();
+    w.clear();
+    const now = this.time.now;
+    for (const g of this.level.gates) {
+      const open = !!s.gates.find((x) => x.id === g.id)?.open;
+      const r = g.rect;
+      if (g.lock.type === 'plate') {
+        const p = g.lock.plate;
+        f.fillStyle(0x2a1f3d, 0.5);
+        f.fillRoundedRect(p.x - 3, p.y - 3, p.w + 6, p.h + 6, 8);
+        f.fillStyle(open ? 0x4fd18b : 0xb8bfce);
+        f.fillRoundedRect(p.x, p.y + (open ? 3 : 0), p.w, p.h - (open ? 3 : 0), 6);
+        f.lineStyle(2, open ? 0x2f9e64 : 0x8a92a6);
+        f.strokeRoundedRect(p.x + 8, p.y + 8 + (open ? 3 : 0), p.w - 16, p.h - 16 - (open ? 3 : 0), 4);
+        if (!open) {
+          // Grille : barreaux dans l'ouverture.
+          w.fillStyle(0x3a3f52);
+          w.fillRect(r.x, r.y, r.w, r.h);
+          w.fillStyle(0xb8bfce);
+          if (g.vertical) for (let y = r.y + 4; y < r.y + r.h; y += 10) w.fillRect(r.x, y, r.w, 4);
+          else for (let x = r.x + 4; x < r.x + r.w; x += 10) w.fillRect(x, r.y, 4, r.h);
+        }
+      } else if (!open) {
+        // Porte blindée.
+        w.fillStyle(0x2a1f3d);
+        w.fillRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2);
+        w.fillStyle(0x7c879c);
+        w.fillRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+        w.fillStyle(0xff5a5a);
+        w.fillCircle(r.x + r.w / 2, r.y + r.h / 2, 4);
+      }
+    }
+    this.level.lasers.forEach((l, i) => {
+      const on = !!s.lasers[i];
+      for (const end of [l.a, l.b]) {
+        w.fillStyle(0x2a1f3d);
+        w.fillCircle(end.x, end.y, 7);
+        w.fillStyle(on ? 0xff3b3b : 0x6b6478);
+        w.fillCircle(end.x, end.y, 4);
+      }
+      if (on) {
+        const pulse = 0.55 + Math.abs(Math.sin(now / 90)) * 0.35;
+        w.lineStyle(7, 0xff3b3b, 0.22);
+        w.lineBetween(l.a.x, l.a.y, l.b.x, l.b.y);
+        w.lineStyle(2.5, 0xff5a5a, pulse);
+        w.lineBetween(l.a.x, l.a.y, l.b.x, l.b.y);
+      } else {
+        // Faisceau éteint : pointillés discrets pour qu'on sache où il passe.
+        f.lineStyle(1.5, 0xff5a5a, 0.35);
+        const len = Math.hypot(l.b.x - l.a.x, l.b.y - l.a.y);
+        for (let d = 0; d < len; d += 16) {
+          const t0 = d / len;
+          const t1 = Math.min(1, (d + 7) / len);
+          f.lineBetween(l.a.x + (l.b.x - l.a.x) * t0, l.a.y + (l.b.y - l.a.y) * t0, l.a.x + (l.b.x - l.a.x) * t1, l.a.y + (l.b.y - l.a.y) * t1);
+        }
+      }
+    });
   }
 
   private cone(origin: Vec, angle: number, range: number, half: number, color: number, alpha: number) {
@@ -485,7 +648,7 @@ export class GameScene extends Phaser.Scene {
     const pts: Vec[] = [{ x: origin.x, y: origin.y }];
     for (let i = 0; i <= rays; i++) {
       const a = angle - half + (i / rays) * half * 2;
-      const d = raycast(origin, a, range, VISION_BLOCKERS);
+      const d = raycast(origin, a, range, this.coneBlockers);
       pts.push({ x: origin.x + Math.cos(a) * d, y: origin.y + Math.sin(a) * d });
     }
     this.cones.fillStyle(color, alpha);
@@ -496,12 +659,13 @@ export class GameScene extends Phaser.Scene {
 
   private renderCones(a: Snapshot, b: Snapshot, t: number, s: Snapshot) {
     this.cones.clear();
-    const ga = a.guard;
-    const gb = b.guard;
-    const gpos = { x: lerp(ga.x, gb.x, t), y: lerp(ga.y, gb.y, t) };
-    const gangle = ga.angle + angleDiff(gb.angle, ga.angle) * t;
-    const g = s.guard;
-    if (g.state !== 'stunned') {
+    this.coneBlockers = this.blockers(s);
+    s.guards.forEach((g, i) => {
+      const ga = a.guards[i];
+      const gb = b.guards[i];
+      if (!ga || !gb || g.state === 'stunned') return;
+      const gpos = { x: lerp(ga.x, gb.x, t), y: lerp(ga.y, gb.y, t) };
+      const gangle = ga.angle + angleDiff(gb.angle, ga.angle) * t;
       let color = 0xfff3a0;
       let alpha = 0.22;
       if (g.state === 'chase') {
@@ -512,11 +676,11 @@ export class GameScene extends Phaser.Scene {
         alpha = 0.24;
       }
       this.cone(gpos, gangle, GUARD_VIEW_RANGE, GUARD_VIEW_HALF_ANGLE, color, alpha);
-    }
+    });
     if (s.camera.enabled) {
       const alarm = s.camera.alarm || this.camFlash > 0;
       const pulse = alarm ? 0.22 + Math.abs(Math.sin(this.time.now / 120)) * 0.14 : 0.16;
-      this.cone(CAMERA, CAMERA.angle, CAMERA_RANGE, CAMERA_HALF_ANGLE, alarm ? 0xff4d4d : 0x8fd3ff, pulse);
+      for (const cam of this.level.cameras) this.cone(cam, cam.angle, CAMERA_RANGE, CAMERA_HALF_ANGLE, alarm ? 0xff4d4d : 0x8fd3ff, pulse);
     }
   }
 
@@ -542,13 +706,17 @@ export class GameScene extends Phaser.Scene {
       text = `Prêt à partir ✓ — en attente de ${partner}`;
     } else {
       const players = s.players.map((p, i) => (i === s.you ? { ...p, x: pos.x, y: pos.y } : p));
-      const inter = findInteraction(players, s.items, s.you);
-      if (inter?.type === 'free') text = `Maintiens E : libérer ${partner}`;
+      const inter = findInteraction(this.level, players, s.items, s.gates, s.you);
+      const plate = this.level.gates.find((g) => g.lock.type === 'plate' && pointInRect(pos.x, pos.y, g.lock.plate));
+      if (inter?.type === 'keypad') text = 'E : taper le code';
+      else if (inter?.type === 'note') text = s.clues.some((c) => c.gate === inter.gate && c.index === inter.index) ? 'E : relire l’indice' : 'E : lire le papier';
+      else if (plate) text = `Tu tiens ${plate.name} ouverte`;
+      else if (inter?.type === 'free') text = `Maintiens E : libérer ${partner}`;
       else if (inter?.type === 'switch' && s.solo) text = s.cameraOff > 0 ? `Caméra coupée (${Math.ceil(s.cameraOff)} s)` : `E : couper la caméra ${SOLO_CAMERA_OFF_TIME} s`;
       else if (inter?.type === 'switch') text = me.hold === 'switch' ? 'Caméra coupée ! Garde E enfoncé' : 'Maintiens E : couper la caméra';
-      else if (inter?.type === 'grab') text = `E : saisir ${ITEM_BY_ID[inter.item].name} (${s.solo ? 'lourd !' : 'à deux'})`;
+      else if (inter?.type === 'grab') text = `E : saisir ${ITEM_CATALOG[inter.item].name} (${s.solo ? 'lourd !' : 'à deux'})`;
       else if (inter?.type === 'pick') {
-        const d = ITEM_BY_ID[inter.item];
+        const d = ITEM_CATALOG[inter.item];
         text = `E : prendre ${d.name} (${d.value} €)`;
       } else if (inter?.type === 'leave' && s.solo) {
         text = 'E : partir avec le butin';
@@ -590,7 +758,7 @@ export class GameScene extends Phaser.Scene {
 
   private renderOverlay(s: Snapshot) {
     // Bordure rouge quand le gardien me poursuit.
-    if (s.guard.state === 'chase' && s.guard.target === s.you) {
+    if (s.guards.some((g) => g.state === 'chase' && g.target === s.you)) {
       const a = 0.25 + Math.abs(Math.sin(this.time.now / 180)) * 0.25;
       this.overlay.lineStyle(26, 0xff3b3b, a);
       this.overlay.strokeRect(0, 0, WORLD_W, WORLD_H);
@@ -615,7 +783,7 @@ export class GameScene extends Phaser.Scene {
         case 'pickup': {
           const p = s.players[ev.seat];
           this.sparkEmitter.explode(14, p.x, p.y - 30);
-          this.floatText(p.x, p.y - 60, ITEM_BY_ID[ev.item].name, '#ffffff', 16);
+          this.floatText(p.x, p.y - 60, ITEM_CATALOG[ev.item].name, '#ffffff', 16);
           sfx.pickup();
           break;
         }
@@ -623,7 +791,7 @@ export class GameScene extends Phaser.Scene {
           sfx.pickup();
           if (ev.seat !== you) {
             const it = s.items.find((i) => i.id === ev.item);
-            if (it && it.state === 'idle') this.bridge.toast(`${partner} tient ${ITEM_BY_ID[ev.item].name} : prends l'autre poignée !`);
+            if (it && it.state === 'idle') this.bridge.toast(`${partner} tient ${ITEM_CATALOG[ev.item].name} : prends l'autre poignée !`);
           }
           break;
         }
@@ -677,6 +845,32 @@ export class GameScene extends Phaser.Scene {
           break;
         case 'denied':
           if (ev.seat === you) this.bridge.toast(ev.reason, 'info');
+          break;
+        case 'laser':
+          this.camFlash = 0.8;
+          this.puffEmitter.explode(6, ev.x, ev.y);
+          sfx.camera();
+          this.bridge.toast('Laser touché ! L’alarme prévient le gardien.', 'bad');
+          break;
+        case 'note': {
+          if (ev.seat !== you) break;
+          const clue = s.clues.find((c) => c.gate === ev.gate && c.index === ev.index);
+          sfx.pickup();
+          if (clue) this.bridge.toast(`Indice : ${clue.text}`, 'good');
+          break;
+        }
+        case 'codeOk': {
+          const g = this.level.gates.find((x) => x.id === ev.gate);
+          sfx.freed();
+          if (g) {
+            this.sparkEmitter.explode(18, g.rect.x + g.rect.w / 2, g.rect.y + g.rect.h / 2);
+            this.bridge.toast(`Code bon ! ${g.name.charAt(0).toUpperCase() + g.name.slice(1)} s’ouvre.`, 'good');
+          }
+          break;
+        }
+        case 'codeWrong':
+          sfx.camera();
+          this.bridge.toast(ev.seat === you ? 'Mauvais code ! Le bip a alerté le gardien.' : `${partner} s’est trompé de code ! Le gardien arrive.`, 'bad');
           break;
       }
     }

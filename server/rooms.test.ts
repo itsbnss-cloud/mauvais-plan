@@ -205,3 +205,28 @@ describe('mode solo', () => {
     await resumed;
   });
 });
+
+describe('niveaux', () => {
+  it('le niveau choisi est transmis et se change au salon', async () => {
+    const a = await client();
+    const b = await client();
+    const created = await call(a, 'room:create', { name: 'Lulu', level: 'villa' });
+    if (!created.ok) throw new Error('création refusée');
+    await call(b, 'room:join', { code: created.code, name: 'Momo' });
+    const changed = lobbyWhere(b, (l) => l.level === 'musee');
+    a.emit('room:level', 'musee');
+    expect((await changed).level).toBe('musee');
+
+    const started = nextSnap(a);
+    a.emit('room:ready', true);
+    b.emit('room:ready', true);
+    const snap = await started;
+    expect(snap.level).toBe('musee');
+    expect(snap.guards).toHaveLength(2);
+    expect(snap.gates.map((g) => g.id)).toEqual(['bijoux', 'forte']);
+
+    // Code envoyé de loin : refusé.
+    const ok = await new Promise((r) => a.emit('keypad', { gate: 'forte', code: '1234' }, r));
+    expect(ok).toBe(false);
+  });
+});

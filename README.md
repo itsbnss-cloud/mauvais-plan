@@ -129,6 +129,21 @@ Après le déploiement, vérifie que `https://ton-domaine/health` répond `{"ok"
 - **Caméra** : elle surveille l'entrée du salon. Si elle repère quelqu'un, le gardien vient voir. Maintenir E sur le boîtier électrique, sur la façade côté jardin, la coupe.
 - **Fin** : les deux joueurs au camion appuient sur E pour partir tout de suite. À la fin du chrono, l'évasion ne réussit que si les deux sont dans la zone de fuite.
 
+### Niveaux
+
+On choisit le niveau à l'accueil (et dans le salon, où chacun peut le changer). Le jardin, le cabanon et le camion ne changent pas, l'intérieur de la maison si.
+
+| Niveau | Difficulté | Ce qui change |
+| --- | --- | --- |
+| Chez les Dupont | ★ | La maison de départ : un gardien, une caméra. |
+| La villa du notaire | ★★ | Un couloir surveillé, deux caméras. Le bureau est fermé par une **porte à code** : les 3 chiffres sont écrits sur des papiers jaunes cachés dans la maison. |
+| Le musée Lumière | ★★★ | Deux gardiens et des **lasers** qui clignotent. La salle des bijoux s'ouvre avec une **plaque de pression**. La chambre forte a un code à 4 chiffres donné sous forme d'**énigmes** (dont un indice caché dans la salle des bijoux). |
+
+- **Papiers et codes** : E devant un papier pour le lire. À deux, chacun ne voit que les indices qu'il a lus lui-même : il faut se les dire. Le code change à chaque partie. E devant le digicode ouvre le pavé numérique ; un mauvais code fait biper le digicode et attire le gardien le plus proche, avec 1,5 s d'attente entre deux essais.
+- **Plaque de pression** : la grille reste ouverte tant qu'un joueur ou un gros objet est posé dessus, et elle ne se referme jamais sur quelqu'un. En solo, il faut y déposer la statue.
+- **Lasers** : ils s'allument et s'éteignent en boucle. Les toucher allumés déclenche l'alarme. Le boîtier électrique du jardin coupe les caméras **et** les lasers.
+- En solo, « Niveau suivant » apparaît sur l'écran de fin après une évasion avec du butin.
+
 ### Mode solo
 
 Le bouton **Jouer seul** de l'accueil lance directement une partie à un seul cambrioleur, sans salon ni invitation. Les règles s'adaptent :

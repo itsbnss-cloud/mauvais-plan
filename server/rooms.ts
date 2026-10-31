@@ -1,6 +1,7 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import type { Server, Socket } from 'socket.io';
 import { MAX_NAME_LENGTH, RECONNECT_GRACE_MS, SNAPSHOT_RATE } from '../shared/constants';
+import { getLevel } from '../shared/levels';
 import type { JoinAck, LobbyState, RoomPhase, Seat } from '../shared/types';
 import { Game } from './game';
 
@@ -19,6 +20,7 @@ interface Room {
   game: Game | null;
   /** Partie à un seul joueur : pas de salon, pas d'invitation. */
   solo: boolean;
+  level: string;
   createdAt: number;
   snapAcc: number;
   lastPhase: RoomPhase;
@@ -67,7 +69,7 @@ export class RoomManager {
         }
       });
 
-    const create = (solo: boolean) => (data: { name?: unknown }, ack: Ack) => {
+    const create = (solo: boolean) => (data: { name?: unknown; level?: unknown }, ack: Ack) => {
       if (typeof ack !== 'function') return;
       if (!this.allow(socket.id)) return ack({ ok: false, error: 'RATE_LIMIT' });
       const name = cleanName(data?.name);
@@ -78,6 +80,7 @@ export class RoomManager {
         seats: [null, null],
         game: null,
         solo,
+        level: getLevel(data?.level).id,
         createdAt: this.now(),
         snapAcc: 0,
         lastPhase: 'lobby',
@@ -139,6 +142,27 @@ export class RoomManager {
       const { room } = ctx;
       if (!room.solo && SEATS.every((s) => room.seats[s]?.ready && room.seats[s]?.socketId)) this.startGame(room);
       this.broadcastLobby(room);
+    });
+
+    // Choix du niveau : au salon à deux, ou à la fin d'une partie solo (niveau suivant).
+    on('room:level', (level: unknown) => {
+      const ctx = this.ctx(socket);
+      if (!ctx) return;
+      const { room } = ctx;
+      if (room.solo ? room.game?.phase !== 'ended' : room.game) return;
+      room.level = getLevel(level).id;
+      if (room.solo) {
+        this.startGame(room);
+      } else {
+        for (const s of SEATS) if (room.seats[s]) room.seats[s]!.ready = false;
+      }
+      this.broadcastLobby(room);
+    });
+
+    on('keypad', (data: { gate?: unknown; code?: unknown }, ack?: (ok: boolean) => void) => {
+      const ctx = this.ctx(socket);
+      const ok = !!ctx?.room.game && ctx.room.game.submitCode(ctx.seat, data?.gate, data?.code);
+      if (typeof ack === 'function') ack(ok);
     });
 
     on('game:replay', () => {
@@ -238,7 +262,7 @@ export class RoomManager {
   // ───────────── Cycle de vie des salons ─────────────
 
   private startGame(room: Room) {
-    room.game = new Game({ solo: room.solo });
+    room.game = new Game({ solo: room.solo, level: room.level });
     room.snapAcc = 1;
     for (const s of SEATS) {
       const info = room.seats[s];
@@ -289,6 +313,7 @@ export class RoomManager {
       code: room.code,
       phase: room.game ? room.game.phase : 'lobby',
       solo: room.solo,
+      level: room.level,
       you,
       players: SEATS.map((s) => {
         const info = room.seats[s];

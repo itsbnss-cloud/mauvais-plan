@@ -67,6 +67,10 @@ export type GameEvent =
   | { type: 'capture'; seat: Seat; x: number; y: number }
   | { type: 'freed'; seat: Seat }
   | { type: 'cameraAlert'; x: number; y: number }
+  | { type: 'laser'; x: number; y: number }
+  | { type: 'note'; seat: Seat; gate: string; index: number }
+  | { type: 'codeOk'; seat: Seat; gate: string }
+  | { type: 'codeWrong'; seat: Seat; gate: string }
   | { type: 'guardAlert'; seat: Seat }
   | { type: 'guardLost' }
   | { type: 'leave'; seat: Seat }
@@ -83,8 +87,21 @@ export interface GameResult {
   detail?: string;
 }
 
+export interface GateSnap {
+  id: string;
+  open: boolean;
+}
+
+/** Indice lu par ce joueur (chacun ne voit que les siens). */
+export interface ClueSnap {
+  gate: string;
+  index: number;
+  text: string;
+}
+
 export interface Snapshot {
   t: number;
+  level: string;
   phase: GamePhase;
   solo: boolean;
   timeLeft: number;
@@ -93,7 +110,11 @@ export interface Snapshot {
   ack: number;
   players: PlayerSnap[];
   items: ItemSnap[];
-  guard: GuardSnap;
+  guards: GuardSnap[];
+  gates: GateSnap[];
+  /** Lasers allumés, dans l'ordre du niveau. */
+  lasers: boolean[];
+  clues: ClueSnap[];
   camera: { enabled: boolean; alarm: boolean };
   loot: number;
   delivered: number;
@@ -115,6 +136,7 @@ export interface LobbyState {
   code: string;
   phase: RoomPhase;
   solo: boolean;
+  level: string;
   you: Seat;
   players: [LobbyPlayer | null, LobbyPlayer | null];
   /** Pause pour déconnexion : siège absent et temps restant (ms). */
